@@ -155,11 +155,14 @@ static void convert_row_15(uint16_t *dst, const uint16_t *src, int w)
 /* ---- profiling (DD2_PROFILE): a line of figures over the picture, also printed to the console ---- */
 
 #ifdef DD2_PROFILE
+#ifdef DD2_HW_RENDER
+void kos_gpu_stats(int *converted, int *failed);
+#endif
 #define PROFILE_PERIOD_NS 2000000000ull
 
 static uint64_t profile_ns[PROFILE_PARTS], profile_since;
 static int profile_frames;
-static char profile_line[48];
+static char profile_line[64];
 
 void platform_profile_add(int part, uint64_t ns)
 {
@@ -182,9 +185,14 @@ void platform_profile_frame(void)
         profile_ns[i] = 0;
     }
     int fps10 = (int)((uint64_t)profile_frames * 10000000000ull / elapsed);
-    snprintf(profile_line, sizeof(profile_line), "%d.%dfps G%d S%d P%d", fps10 / 10, fps10 % 10, pct[PROFILE_GPU],
-             pct[PROFILE_SPU], pct[PROFILE_PRESENT]);
-    printf("dd2 profile: %s (%% of time: G gpu, S spu, P present)\n", profile_line);
+    int converted = 0, failed = 0;
+#ifdef DD2_HW_RENDER
+    kos_gpu_stats(&converted, &failed);
+#endif
+    snprintf(profile_line, sizeof(profile_line), "%d.%dfps G%d S%d P%d T%d X%d", fps10 / 10, fps10 % 10,
+             pct[PROFILE_GPU], pct[PROFILE_SPU], pct[PROFILE_PRESENT], converted, failed);
+    printf("dd2 profile: %s (%% of time: G gpu, S spu, P present; T textures made, X primitives dropped)\n",
+           profile_line);
     profile_frames = 0;
     profile_since = now;
 }

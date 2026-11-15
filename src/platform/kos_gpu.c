@@ -6,8 +6,10 @@
  * lists combine in the original order. Under the primitives goes the buffer's content in the VRAM copy
  * (what LoadImage, ClearImage, MoveImage and fills put there), as a solid colour when it is uniform.
  *
- * Textures: a 256x256 texture page, decoded through its CLUT, becomes an ARGB1555 PVR texture (colour 0
- * transparent, drawn punch-through); a cache keeps them until the VRAM under them is written.
+ * Textures: the part of a texture page a primitive uses (its UVs rounded out to an aligned power-of-two
+ * block, 8x8 up to the whole 256x256 page), decoded through its CLUT, becomes an ARGB1555 PVR texture
+ * (colour 0 transparent, drawn punch-through). A cache keeps the blocks until the VRAM under them is
+ * written; a block is freed only when no recorded frame uses it.
  *
  * PORT: approximations: semi-transparency applies to every texel of a semi-transparent primitive (the PSX
  * takes it per texel from bit 15); mode 2 (B-F) is drawn as B*(1-F); colour modulation stops at 2x
@@ -29,7 +31,9 @@ uint16_t *gpu_vram(void);
 #define SCREEN_H 480.0f
 #define MAX_SLOTS 3
 #define MAX_PRIMS 4096
-#define MAX_TEXTURES 24
+#define MAX_TEXTURES 2048
+#define BUCKETS 256
+#define TEXTURE_BUDGET (2560u * 1024u)
 #define PAGE 256
 #define BACKDROP 512
 #define Z_STEP (1.0f / 4096.0f)
@@ -53,6 +57,7 @@ typedef struct {
     bool backdrop_solid;
     uint16_t backdrop_colour;
     pvr_ptr_t backdrop;
+    int backdrop_h;
     unsigned last_use;
     bool full_reported;
 } Slot;
@@ -60,17 +65,23 @@ typedef struct {
 typedef struct {
     bool used, stale;
     unsigned page, clut, tw; /* page: E1 bits 0-4 and depth (bits 7-8) */
+    int bu, bv, bw, bh;      /* the block of the page, in texels */
     pvr_ptr_t ptr;
-    int x0, y0, x1, y1;      /* texels in VRAM, end exclusive */
+    int x0, y0, x1, y1;      /* its texels in VRAM, end exclusive */
     int cx0, cy, cx1;        /* the CLUT */
     unsigned last_use;
+    int refs;                /* recorded primitives drawing with it */
+    int next;                /* the next block in its hash bucket, -1 at the end */
 } Texture;
 
 static bool ready;
 static Slot slots[MAX_SLOTS];
 static Slot *cur;
 static Texture textures[MAX_TEXTURES];
-static int texture_count;
+static int buckets[BUCKETS]; /* first block of each (page, CLUT, window) hash, -1 when empty */
+static int free_list = -1;   /* unused blocks, linked through next */
+static size_t texture_bytes;
+static int conversions, failures; /* since the last kos_gpu_stats */
 static unsigned frame_counter;
 static struct {
     int x, y, w, h;
@@ -82,6 +93,12 @@ static uint16_t row_buf[BACKDROP] __attribute__((aligned(32)));
 static void init(void)
 {
     ready = true;
+    for (int i = 0; i < BUCKETS; i++)
+        buckets[i] = -1;
+    for (int i = MAX_TEXTURES - 1; i >= 0; i--) {
+        textures[i].next = free_list;
+        free_list = i;
+    }
     for (int i = 0; i < MAX_SLOTS; i++) {
         slots[i].prims = aligned_alloc(32, sizeof(Prim) * MAX_PRIMS);
         if (!slots[i].prims) {
@@ -90,16 +107,9 @@ static void init(void)
             return;
         }
     }
-    /* Keep about 1.5 MB for the screens' backgrounds and the software path's texture. */
-    while (texture_count < MAX_TEXTURES && pvr_mem_available() > PAGE * PAGE * 2 + 1536 * 1024) {
-        textures[texture_count].ptr = pvr_mem_malloc(PAGE * PAGE * 2);
-        if (!textures[texture_count].ptr)
-            break;
-        texture_count++;
-    }
     PVR_SET(PVR_PT_ALPHA_REF, 0x80);
-    printf("kos_gpu: %d texture pages, %u bytes of PVR memory left\n", texture_count,
-           (unsigned)pvr_mem_available());
+    printf("kos_gpu: %u bytes of PVR memory free, %u for textures\n", (unsigned)pvr_mem_available(),
+           TEXTURE_BUDGET);
 }
 
 static uint16_t to_pvr(uint16_t t)
@@ -126,13 +136,14 @@ static void convert_texture(Texture *t)
             lut[i] = to_pvr(vram[cy * VRAM_W + ((cx + i) & (VRAM_W - 1))]);
     int mask_x = (int)(t->tw & 31), mask_y = (int)(t->tw >> 5 & 31);
     int ofs_x = (int)(t->tw >> 10 & 31), ofs_y = (int)(t->tw >> 15 & 31);
-    for (int v = 0; v < PAGE; v++) {
-        int tv = ((v & ~(mask_y * 8)) | ((ofs_y & mask_y) * 8)) & 0xff;
+    for (int v = 0; v < t->bh; v++) {
+        int pv = t->bv + v;
+        int tv = ((pv & ~(mask_y * 8)) | ((ofs_y & mask_y) * 8)) & 0xff;
         const uint16_t *row = vram + ((py + tv) & (VRAM_H - 1)) * VRAM_W;
-        uint16_t *out = convert_buf + v * PAGE;
+        uint16_t *out = convert_buf + v * t->bw;
         if (t->tw == 0 && depth == 0) {
-            for (int w = 0; w < 64; w++) {
-                uint16_t word = row[(px + w) & (VRAM_W - 1)];
+            for (int w = 0; w < t->bw / 4; w++) {
+                uint16_t word = row[(px + t->bu / 4 + w) & (VRAM_W - 1)];
                 out[w * 4] = lut[word & 15];
                 out[w * 4 + 1] = lut[word >> 4 & 15];
                 out[w * 4 + 2] = lut[word >> 8 & 15];
@@ -140,8 +151,9 @@ static void convert_texture(Texture *t)
             }
             continue;
         }
-        for (int u = 0; u < PAGE; u++) {
-            int tu = ((u & ~(mask_x * 8)) | ((ofs_x & mask_x) * 8)) & 0xff;
+        for (int u = 0; u < t->bw; u++) {
+            int pu = t->bu + u;
+            int tu = ((pu & ~(mask_x * 8)) | ((ofs_x & mask_x) * 8)) & 0xff;
             if (depth == 0)
                 out[u] = lut[row[(px + tu / 4) & (VRAM_W - 1)] >> ((tu & 3) * 4) & 15];
             else if (depth == 1)
@@ -150,69 +162,136 @@ static void convert_texture(Texture *t)
                 out[u] = to_pvr(row[(px + tu) & (VRAM_W - 1)]);
         }
     }
-    pvr_txr_load(convert_buf, t->ptr, sizeof(convert_buf));
+    pvr_txr_load(convert_buf, t->ptr, (size_t)(t->bw * t->bh * 2));
+    conversions++;
 }
 
-/* Marks the textures some record still draws with. */
-static void referenced(bool used[MAX_TEXTURES])
+static unsigned bucket_of(unsigned page, unsigned clut, unsigned tw)
 {
-    memset(used, 0, MAX_TEXTURES);
-    for (int s = 0; s < MAX_SLOTS; s++)
-        for (int i = 0; i < slots[s].count; i++)
-            if (slots[s].prims[i].tex >= 0)
-                used[slots[s].prims[i].tex] = true;
+    return (page * 31u + clut * 7u + tw * 13u + (clut >> 6)) % BUCKETS;
 }
 
-static int texture_for(const HwState *s)
+static void free_texture(Texture *t)
+{
+    int index = (int)(t - textures);
+    int *link = &buckets[bucket_of(t->page, t->clut, t->tw)];
+    while (*link != index)
+        link = &textures[*link].next;
+    *link = t->next;
+    pvr_mem_free(t->ptr);
+    texture_bytes -= (size_t)(t->bw * t->bh * 2);
+    t->used = false;
+    t->next = free_list;
+    free_list = index;
+}
+
+/* The smallest aligned power-of-two block (8 at least) holding texels a..b. */
+static int block_size(int a, int b)
+{
+    int size = 8;
+    while (size < PAGE && a / size != b / size)
+        size *= 2;
+    return size;
+}
+
+/* Frees the least recently used block no frame draws with; false when there is none. */
+static bool evict(void)
+{
+    Texture *pick = NULL;
+    for (int i = 0; i < MAX_TEXTURES; i++) {
+        Texture *t = &textures[i];
+        if (t->used && t->refs == 0 && (!pick || t->last_use < pick->last_use))
+            pick = t;
+    }
+    if (!pick)
+        return false;
+    free_texture(pick);
+    return true;
+}
+
+/* The cached block holding texels (u0, v0)..(u1, v1) of the primitive's page, made if needed. */
+static int texture_for(const HwState *s, int u0, int v0, int u1, int v1)
 {
     int depth = (int)(s->texpage >> 7 & 3);
     if (depth == 3)
         depth = 2;
     unsigned page = (s->texpage & 0x1f) | (unsigned)depth << 7;
     unsigned clut = depth < 2 ? s->clut : 0;
-    for (int i = 0; i < texture_count; i++) {
+    unsigned bucket = bucket_of(page, clut, s->tw);
+    for (int i = buckets[bucket]; i >= 0; i = textures[i].next) {
         Texture *t = &textures[i];
-        if (t->used && !t->stale && t->page == page && t->clut == clut && t->tw == s->tw) {
+        if (!t->stale && t->page == page && t->clut == clut && t->tw == s->tw && t->bu <= u0 &&
+            u1 < t->bu + t->bw && t->bv <= v0 && v1 < t->bv + t->bh) {
             t->last_use = frame_counter;
             return i;
         }
     }
-    int pick = -1;
-    for (int i = 0; i < texture_count && pick < 0; i++)
-        if (!textures[i].used)
-            pick = i;
-    if (pick < 0) {
-        bool used[MAX_TEXTURES];
-        referenced(used);
-        for (int i = 0; i < texture_count; i++) {
-            if (used[i])
-                continue;
-            if (textures[i].stale) {
-                pick = i;
-                break;
-            }
-            if (pick < 0 || textures[i].last_use < textures[pick].last_use)
-                pick = i;
-        }
-    }
-    if (pick < 0)
+    int bw = block_size(u0, u1), bh = block_size(v0, v1);
+    size_t bytes = (size_t)(bw * bh * 2);
+    if (free_list < 0 && !evict()) {
+        failures++;
         return -1;
+    }
+    pvr_ptr_t ptr = NULL;
+    while ((texture_bytes + bytes > TEXTURE_BUDGET || !(ptr = pvr_mem_malloc(bytes))) && evict())
+        ;
+    if (!ptr && texture_bytes + bytes <= TEXTURE_BUDGET)
+        ptr = pvr_mem_malloc(bytes);
+    if (!ptr) {
+        failures++;
+        return -1;
+    }
+    int pick = free_list;
+    free_list = textures[pick].next;
     Texture *t = &textures[pick];
+    memset(t, 0, sizeof(*t));
     t->used = true;
-    t->stale = false;
     t->page = page;
     t->clut = clut;
     t->tw = s->tw;
+    t->bu = u0 & ~(bw - 1);
+    t->bv = v0 & ~(bh - 1);
+    t->bw = bw;
+    t->bh = bh;
+    t->ptr = ptr;
+    t->next = buckets[bucket];
+    buckets[bucket] = pick;
+    texture_bytes += bytes;
     t->last_use = frame_counter;
+    int words = depth == 0 ? 4 : depth == 1 ? 2 : 1; /* texels per VRAM word */
     t->x0 = (int)(page & 0xf) * 64;
     t->y0 = (int)(page >> 4 & 1) * 256;
-    t->x1 = t->x0 + (depth == 0 ? 64 : depth == 1 ? 128 : 256);
-    t->y1 = t->y0 + 256;
+    if (s->tw == 0) {
+        t->x1 = t->x0 + (t->bu + bw + words - 1) / words;
+        t->x0 += t->bu / words;
+        t->y1 = t->y0 + t->bv + bh;
+        t->y0 += t->bv;
+    } else {
+        t->x1 = t->x0 + PAGE / words;
+        t->y1 = t->y0 + PAGE;
+    }
     t->cx0 = (int)(clut & 0x3f) * 16;
     t->cy = (int)(clut >> 6 & 0x1ff);
     t->cx1 = depth < 2 ? t->cx0 + (depth == 0 ? 16 : 256) : t->cx0;
     convert_texture(t);
     return pick;
+}
+
+/* Drops the texture references of a record's primitives first..last-1 (they are being thrown away). */
+static void release(Slot *s, int first, int last)
+{
+    for (int i = first; i < last; i++) {
+        int tex = s->prims[i].tex;
+        if (tex >= 0 && --textures[tex].refs == 0 && textures[tex].stale)
+            free_texture(&textures[tex]);
+    }
+}
+
+void kos_gpu_stats(int *converted, int *failed)
+{
+    *converted = conversions;
+    *failed = failures;
+    conversions = failures = 0;
 }
 
 /* ---- recording ---- */
@@ -222,13 +301,15 @@ static pvr_poly_hdr_t header(pvr_list_t list, int tex, int mode)
     static bool have_last;
     static pvr_list_t last_list;
     static int last_tex, last_mode;
+    static pvr_ptr_t last_ptr;
     static pvr_poly_hdr_t last;
-    if (have_last && list == last_list && tex == last_tex && mode == last_mode)
+    pvr_ptr_t ptr = tex >= 0 ? textures[tex].ptr : NULL;
+    if (have_last && list == last_list && tex == last_tex && mode == last_mode && ptr == last_ptr)
         return last;
     pvr_poly_cxt_t cxt;
     if (tex >= 0)
-        pvr_poly_cxt_txr(&cxt, list, PVR_TXRFMT_ARGB1555 | PVR_TXRFMT_NONTWIDDLED, PAGE, PAGE,
-                         textures[tex].ptr, PVR_FILTER_NONE);
+        pvr_poly_cxt_txr(&cxt, list, PVR_TXRFMT_ARGB1555 | PVR_TXRFMT_NONTWIDDLED, textures[tex].bw,
+                         textures[tex].bh, textures[tex].ptr, PVR_FILTER_NONE);
     else
         pvr_poly_cxt_col(&cxt, list);
     cxt.gen.culling = PVR_CULLING_NONE;
@@ -246,11 +327,16 @@ static pvr_poly_hdr_t header(pvr_list_t list, int tex, int mode)
     last_list = list;
     last_tex = tex;
     last_mode = mode;
+    last_ptr = ptr;
     return last;
 }
 
-/* A new primitive at the end of the current record, its header set; NULL when it can't be drawn. */
-static Prim *add_prim(const HwState *s, int *mode)
+/* Texture coordinates of the primitive being added: texel (u, v) is at ((u - u0) * su, (v - v0) * sv). */
+static float map_u0, map_v0, map_su, map_sv;
+
+/* A new primitive at the end of the current record, its header set; NULL when it can't be drawn.
+ * (u0, v0)..(u1, v1) are the texels it uses. */
+static Prim *add_prim(const HwState *s, int *mode, int u0, int v0, int u1, int v1)
 {
     if (!ready || cur->count >= MAX_PRIMS) {
         if (ready && !cur->full_reported) {
@@ -261,9 +347,14 @@ static Prim *add_prim(const HwState *s, int *mode)
     }
     int tex = -1;
     if (s->textured) {
-        tex = texture_for(s);
+        tex = texture_for(s, u0, v0, u1 > 255 ? 255 : u1, v1 > 255 ? 255 : v1);
         if (tex < 0)
             return NULL;
+        textures[tex].refs++;
+        map_u0 = (float)textures[tex].bu;
+        map_v0 = (float)textures[tex].bv;
+        map_su = 1.0f / (float)textures[tex].bw;
+        map_sv = 1.0f / (float)textures[tex].bh;
     }
     *mode = s->semi ? (int)(s->texpage >> 5 & 3) : -1;
     pvr_list_t list = s->semi ? PVR_LIST_TR_POLY : tex >= 0 ? PVR_LIST_PT_POLY : PVR_LIST_OP_POLY;
@@ -298,8 +389,8 @@ static void vertex(pvr_vertex_t *pv, float x, float y, float u, float v, uint32_
     pv->x = (x - (float)cur->x) * cur->sx;
     pv->y = (y - (float)cur->y) * cur->sy;
     pv->z = z;
-    pv->u = u * (1.0f / PAGE);
-    pv->v = v * (1.0f / PAGE);
+    pv->u = (u - map_u0) * map_su;
+    pv->v = (v - map_v0) * map_sv;
     pv->argb = argb;
     pv->oargb = 0;
 }
@@ -323,9 +414,15 @@ static bool drawable(const HwVertex *a, const HwVertex *b, const HwVertex *c)
 
 static void strip(const HwState *s, const HwVertex *const *v, int count)
 {
-    int mode;
+    int mode, u0 = 255, v0 = 255, u1 = 0, v1 = 0;
+    for (int i = 0; i < count; i++) {
+        u0 = v[i]->u < u0 ? v[i]->u : u0;
+        u1 = v[i]->u > u1 ? v[i]->u : u1;
+        v0 = v[i]->v < v0 ? v[i]->v : v0;
+        v1 = v[i]->v > v1 ? v[i]->v : v1;
+    }
     float z = next_z();
-    Prim *p = add_prim(s, &mode);
+    Prim *p = add_prim(s, &mode, u0, v0, u1, v1);
     if (!p)
         return;
     p->count = (uint8_t)count;
@@ -354,7 +451,7 @@ void gpu_hw_rect(const HwState *s, int x, int y, int w, int h, uint8_t r, uint8_
         return;
     int mode;
     float z = next_z();
-    Prim *p = add_prim(s, &mode);
+    Prim *p = add_prim(s, &mode, u, v, u + w - 1, v + h - 1);
     if (!p)
         return;
     uint32_t c = colour(s, mode, r, g, b);
@@ -373,7 +470,7 @@ void gpu_hw_line(const HwState *s, const HwVertex *a, const HwVertex *b)
         return;
     int mode;
     float z = next_z();
-    Prim *p = add_prim(s, &mode);
+    Prim *p = add_prim(s, &mode, 0, 0, 0, 0);
     if (!p)
         return;
     uint32_t ca = colour(s, mode, a->r, a->g, a->b), cb = colour(s, mode, b->r, b->g, b->b);
@@ -409,11 +506,14 @@ static Slot *new_slot(int x, int y, int w, int h)
             pick = &slots[i];
     if (!pick)
         pick = &slots[0];
+    release(pick, 0, pick->count);
     Prim *prims = pick->prims;
     pvr_ptr_t backdrop = pick->backdrop;
+    int backdrop_h = pick->backdrop_h;
     memset(pick, 0, sizeof(*pick));
     pick->prims = prims;
     pick->backdrop = backdrop;
+    pick->backdrop_h = backdrop_h;
     pick->used = true;
     pick->x = x;
     pick->y = y;
@@ -438,6 +538,7 @@ static void settle(Slot *s, bool keep)
         s->base = 0;
         s->single = false;
     }
+    release(s, s->base, s->mark);
     int moved = s->count - s->mark;
     if (s->mark != s->base)
         memmove(&s->prims[s->base], &s->prims[s->mark], sizeof(Prim) * (size_t)moved);
@@ -509,12 +610,15 @@ bool gpu_hw_drawing(void)
 void gpu_hw_vram_written(int x, int y, int w, int h, bool cpu)
 {
     int x1 = x + w, y1 = y + h;
-    for (int i = 0; i < texture_count; i++) {
+    for (int i = 0; i < MAX_TEXTURES; i++) {
         Texture *t = &textures[i];
         if (t->used && !t->stale &&
             (overlaps(x, y, x1, y1, t->x0, t->y0, t->x1, t->y1) ||
-             (t->cx1 > t->cx0 && overlaps(x, y, x1, y1, t->cx0, t->cy, t->cx1, t->cy + 1))))
+             (t->cx1 > t->cx0 && overlaps(x, y, x1, y1, t->cx0, t->cy, t->cx1, t->cy + 1)))) {
             t->stale = true;
+            if (t->refs == 0)
+                free_texture(t);
+        }
     }
     if (!cpu)
         return;
@@ -538,7 +642,11 @@ void gpu_hw_move(int sx, int sy, int w, int h, int dx, int dy)
     if (dst == src)
         return;
     int count = src->pending ? src->mark : src->count;
+    release(dst, 0, dst->count);
     memcpy(dst->prims, src->prims, sizeof(Prim) * (size_t)count);
+    for (int i = 0; i < count; i++)
+        if (dst->prims[i].tex >= 0)
+            textures[dst->prims[i].tex].refs++;
     dst->count = dst->base = count;
     dst->single = dst->pending = false;
     dst->shown = true; /* a copy kept aside (the pause menu's): drawing into it later starts afresh */
@@ -565,8 +673,14 @@ static void update_backdrop(Slot *s)
     s->backdrop_colour = first;
     if (uniform)
         return;
+    int need_h = s->h <= BACKDROP / 2 ? BACKDROP / 2 : BACKDROP;
+    if (s->backdrop && s->backdrop_h < need_h) {
+        pvr_mem_free(s->backdrop);
+        s->backdrop = NULL;
+    }
     if (!s->backdrop) {
-        s->backdrop = pvr_mem_malloc(BACKDROP * BACKDROP * 2);
+        s->backdrop = pvr_mem_malloc((size_t)(BACKDROP * need_h * 2));
+        s->backdrop_h = need_h;
         if (!s->backdrop) {
             printf("kos_gpu: no PVR memory for a background\n");
             s->backdrop_solid = true;
@@ -594,10 +708,10 @@ static void draw_backdrop(const Slot *s)
         pvr_poly_cxt_col(&cxt, PVR_LIST_OP_POLY);
     } else {
         pvr_poly_cxt_txr(&cxt, PVR_LIST_OP_POLY, PVR_TXRFMT_ARGB1555 | PVR_TXRFMT_NONTWIDDLED, BACKDROP,
-                         BACKDROP, s->backdrop, PVR_FILTER_NONE);
+                         s->backdrop_h, s->backdrop, PVR_FILTER_NONE);
         cxt.txr.env = PVR_TXRENV_REPLACE;
         u1 = (float)s->w / BACKDROP;
-        v1 = (float)s->h / BACKDROP;
+        v1 = (float)s->h / (float)s->backdrop_h;
     }
     cxt.gen.culling = PVR_CULLING_NONE;
     cxt.depth.comparison = PVR_DEPTHCMP_ALWAYS;
