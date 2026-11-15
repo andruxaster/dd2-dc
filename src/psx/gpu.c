@@ -1,5 +1,8 @@
 #include "psx/gpu.h"
 #include "psx/libgpu.h"
+#ifdef DD2_HW_RENDER
+#include "psx/gpu_hw.h"
+#endif
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -251,6 +254,21 @@ static void set_texpage_bits(u_int bits)
     st.draw_to_display = (bits >> 10) & 1;
 }
 
+#ifdef DD2_HW_RENDER
+static HwState hw_state(bool textured, bool raw, bool semi, u_int texpage, u_int clut)
+{
+    HwState s = {textured, textured && raw, semi, texpage, clut,
+                 (unsigned)(st.tw_mask_x | st.tw_mask_y << 5 | st.tw_ofs_x << 10 | st.tw_ofs_y << 15)};
+    return s;
+}
+
+static HwVertex hw_vertex(const Vertex *v)
+{
+    HwVertex h = {v->x, v->y, (uint8_t)v->r, (uint8_t)v->g, (uint8_t)v->b, (uint8_t)v->u, (uint8_t)v->v};
+    return h;
+}
+#endif
+
 static int polygon(u_int cmd, const u_int *w, int count)
 {
     bool gouraud = (cmd >> 28) & 1, quad = (cmd >> 27) & 1, textured = (cmd >> 26) & 1;
@@ -284,6 +302,16 @@ static int polygon(u_int cmd, const u_int *w, int count)
     }
     if (!textured)
         raw = false;
+#ifdef DD2_HW_RENDER
+    if (gpu_hw_drawing()) {
+        HwState hs = hw_state(textured, raw, semi, textured ? texpage : st.texpage, clut);
+        HwVertex hv[4];
+        for (int k = 0; k < n; k++)
+            hv[k] = hw_vertex(&v[k]);
+        gpu_hw_polygon(&hs, hv, n);
+        return size;
+    }
+#endif
     triangle(v[0], v[1], v[2], gouraud, textured, raw, semi, texpage, clut);
     if (quad)
         triangle(v[1], v[2], v[3], gouraud, textured, raw, semi, texpage, clut);
@@ -337,7 +365,14 @@ static int line_cmd(u_int cmd, const u_int *w, int count)
         if (i >= count)
             break;
         Vertex cur = line_vertex(color, w[i++]);
-        line(prev, cur, gouraud, semi);
+#ifdef DD2_HW_RENDER
+        if (gpu_hw_drawing()) {
+            HwState hs = hw_state(false, false, semi, st.texpage, 0);
+            HwVertex a = hw_vertex(&prev), b = hw_vertex(&cur);
+            gpu_hw_line(&hs, &a, &b);
+        } else
+#endif
+            line(prev, cur, gouraud, semi);
         prev = cur;
     }
     return i;
@@ -369,6 +404,13 @@ static int rectangle(u_int cmd, const u_int *w, int count)
     int r = (int)(cmd & 0xff), g = (int)((cmd >> 8) & 0xff), b = (int)((cmd >> 16) & 0xff);
     if (!textured)
         raw = false;
+#ifdef DD2_HW_RENDER
+    if (gpu_hw_drawing()) {
+        HwState hs = hw_state(textured, raw, semi, st.texpage, clut);
+        gpu_hw_rect(&hs, x, y, width, height, (uint8_t)r, (uint8_t)g, (uint8_t)b, u0, v0);
+        return size;
+    }
+#endif
     for (int dy = 0; dy < height; dy++)
         for (int dx = 0; dx < width; dx++)
             plot(x + dx, y + dy, r, g, b, textured, raw, semi, false, st.texpage, clut, u0 + dx, v0 + dy);
@@ -384,12 +426,20 @@ static void fill(u_int cmd, u_int xy, u_int wh)
     for (int y = 0; y < h; y++)
         for (int x = 0; x < w; x++)
             vram[((y0 + y) & (VRAM_HEIGHT - 1)) * VRAM_WIDTH + ((x0 + x) & (VRAM_WIDTH - 1))] = pixel;
+#ifdef DD2_HW_RENDER
+    gpu_hw_vram_written(x0, y0, w, h, true);
+#endif
 }
 
 void gpu_gp0(const u_int *w, int count)
 {
     if (!vram)
         gpu_reset();
+#ifdef DD2_HW_RENDER
+    /* Software drawing (outside the screens) changes textures the renderer may hold. */
+    if (!gpu_hw_drawing())
+        gpu_hw_vram_written(st.clip_x1, st.clip_y1, st.clip_x2 - st.clip_x1 + 1, st.clip_y2 - st.clip_y1 + 1, false);
+#endif
     while (count > 0) {
         u_int cmd = w[0];
         int used = 1;

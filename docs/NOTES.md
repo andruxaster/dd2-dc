@@ -80,6 +80,13 @@ been checked against the real game yet. Differences in the code are marked `PORT
   changed VRAM or the display since: the game draws at 30 Hz, the vblank is 60 Hz) and by default
   `DD2_PROFILE` (`psx/profile.h`: game fps and the share of time in the GPU, SPU and present, on screen
   and on the console).
+- Dreamcast PVR renderer (`DD2_HW_RENDER`, `psx/gpu_hw.h`, `platform/kos_gpu.c`): primitives drawn into a
+  screen buffer become PVR polygons recorded per buffer and shown when the game displays it; draw order
+  becomes depth. Texture pages are converted through their CLUT into a cache, invalidated by VRAM writes.
+  What the CPU puts in a screen buffer is drawn under the primitives. Drawing outside the screens stays in
+  software. `PORT:` approximations are listed at the top of `kos_gpu.c` (per-primitive semi-transparency,
+  mode 2 as B*(1-F), modulation capped at 2x, no dither/mask/clip, screen read-backs see no primitives).
+  The pause menu's copy of the frozen picture is followed at the record level.
 - `gpu.c` triangles step the edge functions and attribute numerators per pixel and divide by the area with an
   exact reciprocal multiply: same pixels as the per-pixel divisions (checked on 200,000 random polygons and
   every area at the boundary numerators), but no division per pixel, which the SH4 does in software.

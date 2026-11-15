@@ -2,6 +2,12 @@
 #include "platform/platform.h"
 #include "psx/gpu.h"
 #include "psx/profile.h"
+#ifdef DD2_HW_RENDER
+#include "psx/gpu_hw.h"
+#define HW(call) call
+#else
+#define HW(call) ((void)0)
+#endif
 
 #include <string.h>
 
@@ -65,6 +71,7 @@ int ClearImage(RECT *rect, u_char r, u_char g, u_char b)
             row[(rect->x + x) & (VRAM_WIDTH - 1)] = pixel;
     }
     vram_generation++;
+    HW(gpu_hw_vram_written(rect->x, rect->y, rect->w, rect->h, true));
     PROFILE_END(PROFILE_GPU);
     return 0;
 }
@@ -79,6 +86,7 @@ int LoadImage(RECT *rect, u_long *p)
             row[(rect->x + x) & (VRAM_WIDTH - 1)] = *src++;
     }
     vram_generation++;
+    HW(gpu_hw_vram_written(rect->x, rect->y, rect->w, rect->h, true));
     PROFILE_END(PROFILE_GPU);
     return 0;
 }
@@ -98,6 +106,7 @@ int MoveImage(RECT *rect, int x, int y)
 {
     /* Source and destination may overlap, so copy through a temporary row. */
     u_short line[VRAM_WIDTH];
+    HW(gpu_hw_move(rect->x, rect->y, rect->w, rect->h, x, y));
     for (int row = 0; row < rect->h; row++) {
         const u_short *src = vram[(rect->y + row) & (VRAM_HEIGHT - 1)];
         u_short *dst = vram[(y + row) & (VRAM_HEIGHT - 1)];
@@ -107,6 +116,7 @@ int MoveImage(RECT *rect, int x, int y)
             dst[(x + col) & (VRAM_WIDTH - 1)] = line[col];
     }
     vram_generation++;
+    HW(gpu_hw_vram_written(x, y, rect->w, rect->h, true));
     return 0;
 }
 
@@ -194,6 +204,7 @@ DISPENV *PutDispEnv(DISPENV *env)
 {
     disp_env = *env;
     vram_generation++;
+    HW(gpu_hw_disp_env(env->disp.x, env->disp.y, env->disp.w, env->disp.h, env->isrgb24 != 0));
     PROFILE_FRAME();
     return env;
 }
@@ -223,6 +234,7 @@ DRAWENV *PutDrawEnv(DRAWENV *env)
 {
     draw_env = *env;
     const RECT *c = &env->clip;
+    HW(gpu_hw_draw_env(c->x, c->y, c->x + c->w - 1, c->y + c->h - 1));
     u_int words[5] = {
         0xe3000000 | ((u_int)c->x & 0x3ff) | ((u_int)c->y & 0x1ff) << 10,
         0xe4000000 | ((u_int)(c->x + c->w - 1) & 0x3ff) | ((u_int)(c->y + c->h - 1) & 0x1ff) << 10,
@@ -264,6 +276,19 @@ static int display_area(int *x, int *y, int *w, int *h)
 
 void gpu_present(void)
 {
+#ifdef DD2_HW_RENDER
+    /* The renderer shows its screens itself (and knows when they changed). */
+    {
+        int hx, hy, hw, hh;
+        if (!disp_env.isrgb24 && display_area(&hx, &hy, &hw, &hh)) {
+            PROFILE_START();
+            bool shown = gpu_hw_present(hx, hy, hw, hh);
+            PROFILE_END(PROFILE_PRESENT);
+            if (shown)
+                return;
+        }
+    }
+#endif
 #ifdef DD2_SKIP_UNCHANGED_FRAMES
     /* PORT: slow platforms (the Dreamcast) don't convert and upload a picture they already show. */
     if (vram_generation == shown_generation)

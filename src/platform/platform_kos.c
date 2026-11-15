@@ -22,7 +22,8 @@ enum {
     PSX_TRIANGLE = 1 << 12, PSX_CIRCLE = 1 << 13, PSX_CROSS = 1 << 14, PSX_SQUARE = 1 << 15,
 };
 
-#define TEX_W 1024
+/* The software path's picture (movies, and everything when the PVR renderer is off). */
+#define TEX_W 512
 #define TEX_H 512
 #define TRIGGER_HALF 128
 #define STICK_DEAD 64
@@ -101,7 +102,13 @@ bool platform_init(const char *title, bool test)
     (void)title;
     test_run = test;
     vid_set_mode(DM_640x480, PM_RGB565);
-    if (pvr_init_defaults() < 0)
+    /* Opaque, translucent and punch-through lists (kos_gpu.c draws transparent texels punch-through). */
+    pvr_init_params_t params = {
+        .opb_sizes = {PVR_BINSIZE_16, PVR_BINSIZE_0, PVR_BINSIZE_16, PVR_BINSIZE_0, PVR_BINSIZE_16},
+        .vertex_buf_size = 768 * 1024,
+        .opb_overflow_count = 1,
+    };
+    if (pvr_init(&params) < 0)
         return false;
     pvr_set_bg_color(0, 0, 0);
     texture = pvr_mem_malloc(TEX_W * TEX_H * 2);
