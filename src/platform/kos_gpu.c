@@ -11,8 +11,10 @@
  * (colour 0 transparent, drawn punch-through). A cache keeps the blocks until the VRAM under them is
  * written; a block is freed only when no recorded frame uses it.
  *
- * PORT: approximations: semi-transparency applies to every texel of a semi-transparent primitive (the PSX
- * takes it per texel from bit 15); mode 2 (B-F) is drawn as B*(1-F); colour modulation stops at 2x
+ * A semi-transparent textured primitive is drawn twice, as on the PSX only texels with bit 15 (STP) set
+ * blend: its STP-clear texels punch-through, its STP-set texels translucent (two variants of the block).
+ *
+ * PORT: approximations: mode 2 (B-F) is drawn as B*(1-F); colour modulation stops at 2x
  * brightness of the texel; no dithering, mask bit or drawing-area clipping; reading back a screen buffer
  * (StoreImage, MoveImage of part of it) sees the VRAM copy, which holds no primitives. */
 #include "psx/gpu_hw.h"
@@ -66,6 +68,8 @@ typedef struct {
     bool used, stale;
     unsigned page, clut, tw; /* page: E1 bits 0-4 and depth (bits 7-8) */
     int bu, bv, bw, bh;      /* the block of the page, in texels */
+    int variant;             /* VARIANT_*: which texels it keeps */
+    bool empty;              /* no texel kept */
     pvr_ptr_t ptr;
     int x0, y0, x1, y1;      /* its texels in VRAM, end exclusive */
     int cx0, cy, cx1;        /* the CLUT */
@@ -112,6 +116,10 @@ static void init(void)
            TEXTURE_BUDGET);
 }
 
+/* Which texels a block keeps: all non-zero ones, those without STP (drawn solid when the primitive is
+ * semi-transparent) or those with STP (blended). */
+enum { VARIANT_ALL, VARIANT_SOLID, VARIANT_BLENDED };
+
 static uint16_t to_pvr(uint16_t t)
 {
     return t ? (uint16_t)(0x8000u | (t & 0x03e0u) | (t & 0x001fu) << 10 | (t >> 10 & 0x001fu)) : 0;
@@ -133,7 +141,7 @@ static void convert_texture(Texture *t)
     uint16_t lut[256];
     if (depth < 2)
         for (int i = 0; i < (depth == 0 ? 16 : 256); i++)
-            lut[i] = to_pvr(vram[cy * VRAM_W + ((cx + i) & (VRAM_W - 1))]);
+            lut[i] = vram[cy * VRAM_W + ((cx + i) & (VRAM_W - 1))];
     int mask_x = (int)(t->tw & 31), mask_y = (int)(t->tw >> 5 & 31);
     int ofs_x = (int)(t->tw >> 10 & 31), ofs_y = (int)(t->tw >> 15 & 31);
     for (int v = 0; v < t->bh; v++) {
@@ -159,22 +167,30 @@ static void convert_texture(Texture *t)
             else if (depth == 1)
                 out[u] = lut[row[(px + tu / 2) & (VRAM_W - 1)] >> ((tu & 1) * 8) & 0xff];
             else
-                out[u] = to_pvr(row[(px + tu) & (VRAM_W - 1)]);
+                out[u] = row[(px + tu) & (VRAM_W - 1)];
         }
+    }
+    /* PSX texels (bit 15 = STP) to PVR ones, keeping the variant's. */
+    t->empty = true;
+    for (int i = 0; i < t->bw * t->bh; i++) {
+        uint16_t texel = convert_buf[i];
+        bool keep = texel != 0 && (t->variant == VARIANT_ALL || (t->variant == VARIANT_SOLID) == !(texel & 0x8000));
+        convert_buf[i] = keep ? to_pvr(texel) : 0;
+        t->empty &= !keep;
     }
     pvr_txr_load(convert_buf, t->ptr, (size_t)(t->bw * t->bh * 2));
     conversions++;
 }
 
-static unsigned bucket_of(unsigned page, unsigned clut, unsigned tw)
+static unsigned bucket_of(unsigned page, unsigned clut, unsigned tw, int variant)
 {
-    return (page * 31u + clut * 7u + tw * 13u + (clut >> 6)) % BUCKETS;
+    return (page * 31u + clut * 7u + tw * 13u + (clut >> 6) + (unsigned)variant * 101u) % BUCKETS;
 }
 
 static void free_texture(Texture *t)
 {
     int index = (int)(t - textures);
-    int *link = &buckets[bucket_of(t->page, t->clut, t->tw)];
+    int *link = &buckets[bucket_of(t->page, t->clut, t->tw, t->variant)];
     while (*link != index)
         link = &textures[*link].next;
     *link = t->next;
@@ -210,17 +226,17 @@ static bool evict(void)
 }
 
 /* The cached block holding texels (u0, v0)..(u1, v1) of the primitive's page, made if needed. */
-static int texture_for(const HwState *s, int u0, int v0, int u1, int v1)
+static int texture_for(const HwState *s, int variant, int u0, int v0, int u1, int v1)
 {
     int depth = (int)(s->texpage >> 7 & 3);
     if (depth == 3)
         depth = 2;
     unsigned page = (s->texpage & 0x1f) | (unsigned)depth << 7;
     unsigned clut = depth < 2 ? s->clut : 0;
-    unsigned bucket = bucket_of(page, clut, s->tw);
+    unsigned bucket = bucket_of(page, clut, s->tw, variant);
     for (int i = buckets[bucket]; i >= 0; i = textures[i].next) {
         Texture *t = &textures[i];
-        if (!t->stale && t->page == page && t->clut == clut && t->tw == s->tw && t->bu <= u0 &&
+        if (!t->stale && t->page == page && t->clut == clut && t->tw == s->tw && t->variant == variant && t->bu <= u0 &&
             u1 < t->bu + t->bw && t->bv <= v0 && v1 < t->bv + t->bh) {
             t->last_use = frame_counter;
             return i;
@@ -249,6 +265,7 @@ static int texture_for(const HwState *s, int u0, int v0, int u1, int v1)
     t->page = page;
     t->clut = clut;
     t->tw = s->tw;
+    t->variant = variant;
     t->bu = u0 & ~(bw - 1);
     t->bv = v0 & ~(bh - 1);
     t->bw = bw;
@@ -336,7 +353,7 @@ static float map_u0, map_v0, map_su, map_sv;
 
 /* A new primitive at the end of the current record, its header set; NULL when it can't be drawn.
  * (u0, v0)..(u1, v1) are the texels it uses. */
-static Prim *add_prim(const HwState *s, int *mode, int u0, int v0, int u1, int v1)
+static Prim *add_prim(const HwState *s, int variant, int *mode, int u0, int v0, int u1, int v1)
 {
     if (!ready || cur->count >= MAX_PRIMS) {
         if (ready && !cur->full_reported) {
@@ -347,8 +364,8 @@ static Prim *add_prim(const HwState *s, int *mode, int u0, int v0, int u1, int v
     }
     int tex = -1;
     if (s->textured) {
-        tex = texture_for(s, u0, v0, u1 > 255 ? 255 : u1, v1 > 255 ? 255 : v1);
-        if (tex < 0)
+        tex = texture_for(s, variant, u0, v0, u1 > 255 ? 255 : u1, v1 > 255 ? 255 : v1);
+        if (tex < 0 || textures[tex].empty)
             return NULL;
         textures[tex].refs++;
         map_u0 = (float)textures[tex].bu;
@@ -356,8 +373,9 @@ static Prim *add_prim(const HwState *s, int *mode, int u0, int v0, int u1, int v
         map_su = 1.0f / (float)textures[tex].bw;
         map_sv = 1.0f / (float)textures[tex].bh;
     }
-    *mode = s->semi ? (int)(s->texpage >> 5 & 3) : -1;
-    pvr_list_t list = s->semi ? PVR_LIST_TR_POLY : tex >= 0 ? PVR_LIST_PT_POLY : PVR_LIST_OP_POLY;
+    bool blended = s->semi && (!s->textured || variant == VARIANT_BLENDED);
+    *mode = blended ? (int)(s->texpage >> 5 & 3) : -1;
+    pvr_list_t list = blended ? PVR_LIST_TR_POLY : tex >= 0 ? PVR_LIST_PT_POLY : PVR_LIST_OP_POLY;
     Prim *p = &cur->prims[cur->count];
     p->hdr = header(list, tex, *mode);
     p->list = (uint8_t)list;
@@ -412,7 +430,7 @@ static bool drawable(const HwVertex *a, const HwVertex *b, const HwVertex *c)
     return true;
 }
 
-static void strip(const HwState *s, const HwVertex *const *v, int count)
+static void strip_variant(const HwState *s, int variant, const HwVertex *const *v, int count)
 {
     int mode, u0 = 255, v0 = 255, u1 = 0, v1 = 0;
     for (int i = 0; i < count; i++) {
@@ -422,13 +440,23 @@ static void strip(const HwState *s, const HwVertex *const *v, int count)
         v1 = v[i]->v > v1 ? v[i]->v : v1;
     }
     float z = next_z();
-    Prim *p = add_prim(s, &mode, u0, v0, u1, v1);
+    Prim *p = add_prim(s, variant, &mode, u0, v0, u1, v1);
     if (!p)
         return;
     p->count = (uint8_t)count;
     for (int i = 0; i < count; i++)
         vertex(&p->v[i], (float)v[i]->x, (float)v[i]->y, v[i]->u, v[i]->v,
                colour(s, mode, v[i]->r, v[i]->g, v[i]->b), z, i == count - 1);
+}
+
+static void strip(const HwState *s, const HwVertex *const *v, int count)
+{
+    if (s->textured && s->semi) {
+        strip_variant(s, VARIANT_SOLID, v, count);
+        strip_variant(s, VARIANT_BLENDED, v, count);
+    } else {
+        strip_variant(s, VARIANT_ALL, v, count);
+    }
 }
 
 void gpu_hw_polygon(const HwState *s, const HwVertex *v, int count)
@@ -445,13 +473,12 @@ void gpu_hw_polygon(const HwState *s, const HwVertex *v, int count)
     }
 }
 
-void gpu_hw_rect(const HwState *s, int x, int y, int w, int h, uint8_t r, uint8_t g, uint8_t b, int u, int v)
+static void rect_variant(const HwState *s, int variant, int x, int y, int w, int h, uint8_t r, uint8_t g,
+                         uint8_t b, int u, int v)
 {
-    if (w <= 0 || h <= 0)
-        return;
     int mode;
     float z = next_z();
-    Prim *p = add_prim(s, &mode, u, v, u + w - 1, v + h - 1);
+    Prim *p = add_prim(s, variant, &mode, u, v, u + w - 1, v + h - 1);
     if (!p)
         return;
     uint32_t c = colour(s, mode, r, g, b);
@@ -462,6 +489,18 @@ void gpu_hw_rect(const HwState *s, int x, int y, int w, int h, uint8_t r, uint8_
     vertex(&p->v[3], (float)(x + w), (float)(y + h), (float)(u + w), (float)(v + h), c, z, true);
 }
 
+void gpu_hw_rect(const HwState *s, int x, int y, int w, int h, uint8_t r, uint8_t g, uint8_t b, int u, int v)
+{
+    if (w <= 0 || h <= 0)
+        return;
+    if (s->textured && s->semi) {
+        rect_variant(s, VARIANT_SOLID, x, y, w, h, r, g, b, u, v);
+        rect_variant(s, VARIANT_BLENDED, x, y, w, h, r, g, b, u, v);
+    } else {
+        rect_variant(s, VARIANT_ALL, x, y, w, h, r, g, b, u, v);
+    }
+}
+
 /* A line as a quad one PSX pixel thick across its major direction. */
 void gpu_hw_line(const HwState *s, const HwVertex *a, const HwVertex *b)
 {
@@ -470,7 +509,7 @@ void gpu_hw_line(const HwState *s, const HwVertex *a, const HwVertex *b)
         return;
     int mode;
     float z = next_z();
-    Prim *p = add_prim(s, &mode, 0, 0, 0, 0);
+    Prim *p = add_prim(s, VARIANT_ALL, &mode, 0, 0, 0, 0);
     if (!p)
         return;
     uint32_t ca = colour(s, mode, a->r, a->g, a->b), cb = colour(s, mode, b->r, b->g, b->b);
