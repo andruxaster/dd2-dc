@@ -2,6 +2,7 @@
 
 #include "platform/platform.h"
 #include "psx/libcd.h"
+#include "psx/profile.h"
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -363,6 +364,8 @@ void spu_service(void)
     vblanks_mixed++;
     int frames = (int)(vblanks_mixed * SPU_RATE * 1001 / 60000 - start);
     short out[MAX_VBLANK_FRAMES * 2];
+    PROFILE_START();
     spu_mix(out, frames);
+    PROFILE_END(PROFILE_SPU);
     platform_audio_push(out, frames);
 }

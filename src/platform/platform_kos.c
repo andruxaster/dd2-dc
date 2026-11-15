@@ -7,6 +7,7 @@
  * Y = Triangle). */
 #include "platform/platform.h"
 
+#include <dc/biosfont.h>
 #include <kos.h>
 #include <stdio.h>
 #include <string.h>
@@ -144,6 +145,55 @@ static void convert_row_15(uint16_t *dst, const uint16_t *src, int w)
     }
 }
 
+/* ---- profiling (DD2_PROFILE): a line of figures over the picture, also printed to the console ---- */
+
+#ifdef DD2_PROFILE
+#define PROFILE_PERIOD_NS 2000000000ull
+
+static uint64_t profile_ns[PROFILE_PARTS], profile_since;
+static int profile_frames;
+static char profile_line[48];
+
+void platform_profile_add(int part, uint64_t ns)
+{
+    profile_ns[part] += ns;
+}
+
+/* Game frames per second and the share of time in the GPU, the SPU and showing the picture. */
+void platform_profile_frame(void)
+{
+    uint64_t now = timer_ns_gettime64();
+    if (profile_since == 0)
+        profile_since = now;
+    profile_frames++;
+    uint64_t elapsed = now - profile_since;
+    if (elapsed < PROFILE_PERIOD_NS)
+        return;
+    int pct[PROFILE_PARTS];
+    for (int i = 0; i < PROFILE_PARTS; i++) {
+        pct[i] = (int)(profile_ns[i] * 100 / elapsed);
+        profile_ns[i] = 0;
+    }
+    int fps10 = (int)((uint64_t)profile_frames * 10000000000ull / elapsed);
+    snprintf(profile_line, sizeof(profile_line), "%d.%dfps G%d S%d P%d", fps10 / 10, fps10 % 10, pct[PROFILE_GPU],
+             pct[PROFILE_SPU], pct[PROFILE_PRESENT]);
+    printf("dd2 profile: %s (%% of time: G gpu, S spu, P present)\n", profile_line);
+    profile_frames = 0;
+    profile_since = now;
+}
+
+static void draw_profile_line(void)
+{
+    if (profile_line[0] && frame_h >= BFONT_HEIGHT)
+        bfont_draw_str_ex((uint16_t *)texture + (frame_h - BFONT_HEIGHT) * TEX_W, TEX_W, 0xffff,
+                          frame_rgb565 ? 0x0000 : 0x8000, 16, true, profile_line);
+}
+#else
+static void draw_profile_line(void)
+{
+}
+#endif
+
 /* Draws the texture's top-left w x h texels over the whole screen. Skips the frame when the PVR is
  * still busy with the last one: the game's pace comes from the emulated vblank, never from here. */
 static void draw_frame(void)
@@ -196,6 +246,7 @@ void platform_present(const uint16_t *pixels, int w, int h, int pitch)
     frame_w = w;
     frame_h = h;
     frame_rgb565 = false;
+    draw_profile_line();
     draw_frame();
 }
 
@@ -216,6 +267,7 @@ void platform_present_rgb24(const uint8_t *pixels, int w, int h, int pitch)
     frame_w = w;
     frame_h = h;
     frame_rgb565 = true;
+    draw_profile_line();
     draw_frame();
 }
 

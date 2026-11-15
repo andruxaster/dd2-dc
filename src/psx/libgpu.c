@@ -1,11 +1,14 @@
 #include "psx/libgpu.h"
 #include "platform/platform.h"
 #include "psx/gpu.h"
+#include "psx/profile.h"
 
 #include <string.h>
 
 /* Pixels are PSX 15-bit: bits 0-4 red, 5-9 green, 10-14 blue, bit 15 mask/semi-transparency. */
 static u_short vram[VRAM_HEIGHT][VRAM_WIDTH];
+/* Bumped by everything that changes VRAM or the display, so an unchanged picture need not be shown again. */
+static unsigned vram_generation, shown_generation = ~0u;
 static DISPENV disp_env;
 static DRAWENV draw_env;
 static int display_enabled;
@@ -42,6 +45,7 @@ int GetGraphType(void)
 void SetDispMask(int mask)
 {
     display_enabled = mask != 0;
+    vram_generation++;
 }
 
 int DrawSync(int mode)
@@ -53,23 +57,29 @@ int DrawSync(int mode)
 
 int ClearImage(RECT *rect, u_char r, u_char g, u_char b)
 {
+    PROFILE_START();
     u_short pixel = (u_short)((r >> 3) | ((g >> 3) << 5) | ((b >> 3) << 10));
     for (int y = 0; y < rect->h; y++) {
         u_short *row = vram[(rect->y + y) & (VRAM_HEIGHT - 1)];
         for (int x = 0; x < rect->w; x++)
             row[(rect->x + x) & (VRAM_WIDTH - 1)] = pixel;
     }
+    vram_generation++;
+    PROFILE_END(PROFILE_GPU);
     return 0;
 }
 
 int LoadImage(RECT *rect, u_long *p)
 {
+    PROFILE_START();
     const u_short *src = (const u_short *)p;
     for (int y = 0; y < rect->h; y++) {
         u_short *row = vram[(rect->y + y) & (VRAM_HEIGHT - 1)];
         for (int x = 0; x < rect->w; x++)
             row[(rect->x + x) & (VRAM_WIDTH - 1)] = *src++;
     }
+    vram_generation++;
+    PROFILE_END(PROFILE_GPU);
     return 0;
 }
 
@@ -96,6 +106,7 @@ int MoveImage(RECT *rect, int x, int y)
         for (int col = 0; col < rect->w; col++)
             dst[(x + col) & (VRAM_WIDTH - 1)] = line[col];
     }
+    vram_generation++;
     return 0;
 }
 
@@ -116,14 +127,20 @@ static void run_packet(const OT_TAG *p)
 
 void DrawOTag(OT_TAG *p)
 {
+    PROFILE_START();
     for (; p; p = p->next)
         if (p->len)
             run_packet(p);
+    vram_generation++;
+    PROFILE_END(PROFILE_GPU);
 }
 
 void DrawPrim(void *p)
 {
+    PROFILE_START();
     run_packet((const OT_TAG *)p);
+    vram_generation++;
+    PROFILE_END(PROFILE_GPU);
 }
 
 u_short GetTPage(int tp, int abr, int x, int y)
@@ -176,6 +193,8 @@ DISPENV *SetDefDispEnv(DISPENV *env, int x, int y, int w, int h)
 DISPENV *PutDispEnv(DISPENV *env)
 {
     disp_env = *env;
+    vram_generation++;
+    PROFILE_FRAME();
     return env;
 }
 
@@ -212,6 +231,7 @@ DRAWENV *PutDrawEnv(DRAWENV *env)
         texture_window(&env->tw),
     };
     gpu_gp0(words, 5);
+    vram_generation++;
     if (env->isbg)
         ClearImage(&env->clip, env->r0, env->g0, env->b0);
     return env;
@@ -244,6 +264,13 @@ static int display_area(int *x, int *y, int *w, int *h)
 
 void gpu_present(void)
 {
+#ifdef DD2_SKIP_UNCHANGED_FRAMES
+    /* PORT: slow platforms (the Dreamcast) don't convert and upload a picture they already show. */
+    if (vram_generation == shown_generation)
+        return;
+#endif
+    shown_generation = vram_generation;
+    PROFILE_START();
     int x, y, w, h;
     if (!display_area(&x, &y, &w, &h))
         platform_present(NULL, 0, 0, 0);
@@ -251,6 +278,7 @@ void gpu_present(void)
         platform_present_rgb24((const uint8_t *)&vram[y][x], w, h, VRAM_WIDTH * 2);
     else
         platform_present(&vram[y][x], w, h, VRAM_WIDTH);
+    PROFILE_END(PROFILE_PRESENT);
 }
 
 int gpu_save_display(const char *path)

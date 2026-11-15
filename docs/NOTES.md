@@ -76,6 +76,10 @@ been checked against the real game yet. Differences in the code are marked `PORT
   is skipped when the PVR is still busy, never delayed. Sound goes through a ring into a KOS sound stream.
   Memory cards stay in memory (`platform_card_path` returns false; 128 KB does not fit on a VMU). Mapping in
   `README.md`.
+- `Makefile.dc` defines `DD2_SKIP_UNCHANGED_FRAMES` (libgpu does not show a picture again when nothing
+  changed VRAM or the display since: the game draws at 30 Hz, the vblank is 60 Hz) and by default
+  `DD2_PROFILE` (`psx/profile.h`: game fps and the share of time in the GPU, SPU and present, on screen
+  and on the console).
 - `gpu.c` triangles step the edge functions and attribute numerators per pixel and divide by the area with an
   exact reciprocal multiply: same pixels as the per-pixel divisions (checked on 200,000 random polygons and
   every area at the boundary numerators), but no division per pixel, which the SH4 does in software.

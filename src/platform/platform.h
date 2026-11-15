@@ -47,4 +47,11 @@ bool platform_card_path(int slot, char *path, int size);
 uint64_t platform_ticks_ns(void);
 void platform_sleep_until_ns(uint64_t ticks_ns);
 
+#ifdef DD2_PROFILE
+/* Time spent in a part of the library, and one game frame shown (a display buffer flip). */
+enum { PROFILE_GPU, PROFILE_SPU, PROFILE_PRESENT, PROFILE_PARTS };
+void platform_profile_add(int part, uint64_t ns);
+void platform_profile_frame(void);
+#endif
+
 #endif

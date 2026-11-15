@@ -15,6 +15,9 @@ OBJS := $(SRCS:%.c=$(BUILD)/%.o)
 CSTD = -std=c11
 WARN = -Wall -Wextra -Wno-unused-parameter
 OPT ?= -O2
+# DD2_PROFILE=0 drops the on-screen timing line.
+DD2_PROFILE ?= 1
+DEFS = -DDD2_SKIP_UNCHANGED_FRAMES $(if $(filter 1,$(DD2_PROFILE)),-DDD2_PROFILE)
 
 all: $(TARGET)
 
@@ -22,7 +25,7 @@ include $(KOS_BASE)/Makefile.rules
 
 $(BUILD)/%.o: %.c
 	@mkdir -p $(dir $@)
-	kos-cc $(CSTD) $(OPT) $(WARN) -Isrc -c $< -o $@
+	kos-cc $(CSTD) $(OPT) $(WARN) $(DEFS) -Isrc -c $< -o $@
 
 # Only the platform layer includes KOS headers, which need the GNU dialect (and would clash with the
 # Psy-Q u_int/u_long types in game code).
