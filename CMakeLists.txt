@@ -33,7 +33,8 @@ endfunction()
 
 # Everything but the entry point, so tests can link the game and library code.
 file(GLOB_RECURSE DD2_SOURCES CONFIGURE_DEPENDS src/*.c)
-list(REMOVE_ITEM DD2_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/src/main.c)
+list(REMOVE_ITEM DD2_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/src/main.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/platform/platform_kos.c)
 add_library(dd2_core STATIC ${DD2_SOURCES})
 target_include_directories(dd2_core PUBLIC src)
 target_link_libraries(dd2_core PUBLIC SDL3::SDL3)

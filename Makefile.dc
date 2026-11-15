@@ -1,0 +1,50 @@
+# Dreamcast build (KallistiOS). Source environ.sh first, then:
+#   make -f Makefile.dc            -> dd2.elf
+#   make -f Makefile.dc cdi        -> dd2.cdi with the game data from assets/ (needs mkdcdisc)
+#   make -f Makefile.dc selfboot   -> selfboot/1ST_READ.BIN + IP.BIN; copy assets/ contents next to them
+#                                     and make the CDI with BootDreams (or any selfboot tool)
+# The desktop build (CMake + SDL3) is unaffected: platform_kos.c is left out of it.
+
+TARGET = dd2.elf
+BUILD = build-dc
+ASSETS ?= assets
+
+SRCS := $(filter-out src/platform/platform_sdl.c,$(wildcard src/*.c src/*/*.c))
+OBJS := $(SRCS:%.c=$(BUILD)/%.o)
+
+CSTD = -std=c11
+WARN = -Wall -Wextra -Wno-unused-parameter
+OPT ?= -O2
+
+all: $(TARGET)
+
+include $(KOS_BASE)/Makefile.rules
+
+$(BUILD)/%.o: %.c
+	@mkdir -p $(dir $@)
+	kos-cc $(CSTD) $(OPT) $(WARN) -Isrc -c $< -o $@
+
+# Only the platform layer includes KOS headers, which need the GNU dialect (and would clash with the
+# Psy-Q u_int/u_long types in game code).
+$(BUILD)/src/platform/platform_kos.o: CSTD = -std=gnu11
+
+$(TARGET): $(OBJS)
+	kos-cc -o $@ $(OBJS) -lm
+
+cdi: $(TARGET)
+	mkdcdisc -e $(TARGET) -d $(ASSETS) -n "Destruction Derby 2" -o dd2.cdi
+
+selfboot: $(TARGET)
+	@mkdir -p selfboot
+	$(KOS_OBJCOPY) -R .stack -O binary $(TARGET) selfboot/dd2.bin
+	$(KOS_BASE)/utils/scramble/scramble selfboot/dd2.bin selfboot/1ST_READ.BIN
+	rm selfboot/dd2.bin
+	$(KOS_BASE)/utils/makeip/makeip -g "DESTRUCTION DERBY 2" -c "DD2 PORT" -f selfboot/IP.BIN
+
+run: $(TARGET)
+	$(KOS_LOADER) $(TARGET)
+
+clean:
+	rm -rf $(BUILD) $(TARGET) dd2.cdi selfboot
+
+.PHONY: all cdi selfboot run clean

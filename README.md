@@ -34,6 +34,25 @@ ctest --test-dir build-msvc -C Debug
 
 There is also a `ninja` preset (`build-ninja/`) for GCC or Clang. MSVC is the compiler the port is tested with.
 
+### Dreamcast
+
+`Makefile.dc` builds `dd2.elf` with KallistiOS (`src/platform/platform_kos.c` in place of the SDL layer):
+
+```
+source $KOS_BASE/environ.sh
+make -f Makefile.dc            # dd2.elf
+make -f Makefile.dc cdi        # dd2.cdi from assets/ (mkdcdisc)
+make -f Makefile.dc selfboot   # selfboot/1ST_READ.BIN (scrambled) and IP.BIN
+```
+
+With BootDreams: copy the contents of `assets/` (with the `music/` folder) next to `1ST_READ.BIN` and
+make a DiscJuggler (CDI) image of that folder. The binary is already scrambled.
+
+The game reads the disc at `/cd`: the contents of `assets/` (with `music/`) go at the disc's root, or the
+folder itself as `/cd/assets`. Pad:
+A ✕, B ○, X □, Y △, Start, left trigger L1, right trigger R2, both triggers Select; the stick also steers.
+Memory cards are kept in RAM only for now (a PSX card image is bigger than a VMU).
+
 ## Game data
 
 Make the `assets/` folder from a `.cue`/`.bin` disc image of the USA version (needs Python 3, no extra packages):

@@ -1152,7 +1152,8 @@ static const int16_t champ_stats_panel[4] = {-142, -42, 282, 120}; /* 0x801EDB08
 static int32_t champ_stats_page;           /* 0x801EDB20 */
 static char champ_stats_names[20][0x20];   /* 0x801F26E0 */
 static char champ_stats_season[0x20];      /* 0x801F2960 */
-static ScreenText champ_stats_text[5 + 20 * 2 + 1]; /* 0x801ECBB0 */
+/* Three title lines, two column headings per column, 20 rows of two, the terminator. */
+static ScreenText champ_stats_text[3 + 2 * 2 + 20 * 2 + 1]; /* 0x801ECBB0 */
 
 static const char *const stat_places[20] = {
     "%R%JL%T/1", "%R%JL%T/2", "%R%JL%T/3", "%R%JL%T/4", "%R%JL%T/5", "%R%JL%T/6", "%R%JL%T/7",

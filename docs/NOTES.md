@@ -72,6 +72,14 @@ been checked against the real game yet. Differences in the code are marked `PORT
 
 ## Port decisions
 
+- Dreamcast (`platform_kos.c`): the display area becomes a 1024x512 PVR texture drawn over 640x480; a frame
+  is skipped when the PVR is still busy, never delayed. Sound goes through a ring into a KOS sound stream.
+  Memory cards stay in memory (`platform_card_path` returns false; 128 KB does not fit on a VMU). Mapping in
+  `README.md`.
+- `gpu.c` triangles step the edge functions and attribute numerators per pixel and divide by the area with an
+  exact reciprocal multiply: same pixels as the per-pixel divisions (checked on 200,000 random polygons and
+  every area at the boundary numerators), but no division per pixel, which the SH4 does in software.
+
 - Memory cards are 128 KB raw card images (the format emulators use) in the user's data folder
   (`SDL_GetPrefPath`): `memcard1.mcd` is made, formatted, when missing; slot 2 is only there when
   `memcard2.mcd` exists. Test runs use a card in memory only.

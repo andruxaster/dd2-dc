@@ -135,9 +135,12 @@ static void plot(int x, int y, int r, int g, int b, bool textured, bool raw, boo
 
 /* ---- triangles ---- */
 
-static int64_t edge(const Vertex *a, const Vertex *b, int px, int py)
+/* 32 bits are enough: triangle() only gets here with edges under 1024 x 512 and points inside VRAM, so
+ * |edge| < 2^23 and an attribute sum (edge * 255 at most, three of them adding up to the area) < 2^31.
+ * 64-bit products and divisions would cost a library call per pixel on 32-bit CPUs (the Dreamcast). */
+static int32_t edge(const Vertex *a, const Vertex *b, int px, int py)
 {
-    return (int64_t)(b->x - a->x) * (py - a->y) - (int64_t)(b->y - a->y) * (px - a->x);
+    return (int32_t)(b->x - a->x) * (py - a->y) - (int32_t)(b->y - a->y) * (px - a->x);
 }
 
 /* Top-left rule: pixels exactly on an edge are drawn only for top or left edges. With the
@@ -158,7 +161,7 @@ static void triangle(Vertex v0, Vertex v1, Vertex v2, bool gouraud, bool texture
         if (a->x - b->x > 1023 || b->x - a->x > 1023 || a->y - b->y > 511 || b->y - a->y > 511)
             return;
     }
-    int64_t area = edge(&v0, &v1, v2.x, v2.y);
+    int32_t area = edge(&v0, &v1, v2.x, v2.y);
     if (area == 0)
         return;
     if (area < 0) {
@@ -174,24 +177,67 @@ static void triangle(Vertex v0, Vertex v1, Vertex v2, bool gouraud, bool texture
     bool tl0 = top_left(&v1, &v2), tl1 = top_left(&v2, &v0), tl2 = top_left(&v0, &v1);
     bool dither = st.dither && (gouraud || (textured && !raw));
 
+    /* Each edge function drops by its edge's dy for every step right (exactly what edge() gives). */
+    int32_t dx0 = v2.y - v1.y, dx1 = v0.y - v2.y, dx2 = v1.y - v0.y;
+
+    /* An attribute is floor((w0 * a0 + w1 * a1 + w2 * a2) / area). Inside the triangle the numerator is
+     * below 2^29 (the weights add up to the area, attributes are bytes), so the division is done exactly
+     * as a multiply by a rounded-up reciprocal and a shift (Granlund & Montgomery): one 32x32->64
+     * multiply per attribute instead of a division per pixel. The numerators step like the edges. */
+    enum { NUM_BITS = 29 };
+    int log2_area = 0;
+    while ((1 << log2_area) < area)
+        log2_area++;
+    int shift = NUM_BITS + log2_area;
+    uint32_t magic = (uint32_t)(((uint64_t)1 << shift) / (uint64_t)area + 1);
+    int attr_count = 0;
+    int a0[5], a1[5], a2[5];
+    if (gouraud) {
+        a0[0] = v0.r, a1[0] = v1.r, a2[0] = v2.r;
+        a0[1] = v0.g, a1[1] = v1.g, a2[1] = v2.g;
+        a0[2] = v0.b, a1[2] = v1.b, a2[2] = v2.b;
+        attr_count = 3;
+    }
+    if (textured) {
+        a0[attr_count] = v0.u, a1[attr_count] = v1.u, a2[attr_count] = v2.u;
+        attr_count++;
+        a0[attr_count] = v0.v, a1[attr_count] = v1.v, a2[attr_count] = v2.v;
+        attr_count++;
+    }
+    int32_t step[5];
+    for (int i = 0; i < attr_count; i++)
+        step[i] = dx0 * a0[i] + dx1 * a1[i] + dx2 * a2[i];
+
     for (int y = min_y; y <= max_y; y++) {
+        int32_t w0 = edge(&v1, &v2, min_x, y), w1 = edge(&v2, &v0, min_x, y), w2 = edge(&v0, &v1, min_x, y);
+        int32_t num[5];
+        for (int i = 0; i < attr_count; i++)
+            num[i] = w0 * a0[i] + w1 * a1[i] + w2 * a2[i];
         for (int x = min_x; x <= max_x; x++) {
-            int64_t w0 = edge(&v1, &v2, x, y), w1 = edge(&v2, &v0, x, y), w2 = edge(&v0, &v1, x, y);
-            if (w0 < 0 || w1 < 0 || w2 < 0)
-                continue;
-            if ((w0 == 0 && !tl0) || (w1 == 0 && !tl1) || (w2 == 0 && !tl2))
-                continue;
-            int r = v0.r, g = v0.g, b = v0.b, u = 0, v = 0;
-            if (gouraud) {
-                r = (int)((w0 * v0.r + w1 * v1.r + w2 * v2.r) / area);
-                g = (int)((w0 * v0.g + w1 * v1.g + w2 * v2.g) / area);
-                b = (int)((w0 * v0.b + w1 * v1.b + w2 * v2.b) / area);
+            bool inside = w0 >= 0 && w1 >= 0 && w2 >= 0 &&
+                          (w0 != 0 || tl0) && (w1 != 0 || tl1) && (w2 != 0 || tl2);
+            if (inside) {
+                int q[5];
+                for (int i = 0; i < attr_count; i++)
+                    q[i] = (int)(((uint64_t)(uint32_t)num[i] * magic) >> shift);
+                int r = v0.r, g = v0.g, b = v0.b, u = 0, v = 0, k = 0;
+                if (gouraud) {
+                    r = q[0];
+                    g = q[1];
+                    b = q[2];
+                    k = 3;
+                }
+                if (textured) {
+                    u = q[k];
+                    v = q[k + 1];
+                }
+                plot(x, y, r, g, b, textured, raw, semi, dither, texpage, clut, u, v);
             }
-            if (textured) {
-                u = (int)((w0 * v0.u + w1 * v1.u + w2 * v2.u) / area);
-                v = (int)((w0 * v0.v + w1 * v1.v + w2 * v2.v) / area);
-            }
-            plot(x, y, r, g, b, textured, raw, semi, dither, texpage, clut, u, v);
+            w0 -= dx0;
+            w1 -= dx1;
+            w2 -= dx2;
+            for (int i = 0; i < attr_count; i++)
+                num[i] -= step[i];
         }
     }
 }

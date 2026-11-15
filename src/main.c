@@ -27,7 +27,15 @@
 #include "psx/libpad.h"
 #include "system/controller.h"
 
+#ifdef _arch_dreamcast
+/* PORT: the Dreamcast build reads the disc directly: the game files at its root, or in an assets folder
+ * (disc tools differ in whether they copy a folder or its contents). */
+#define DEFAULT_ASSETS "/cd"
+#define FALLBACK_ASSETS "/cd/assets"
+#else
 #include <SDL3/SDL_main.h>
+#define DEFAULT_ASSETS "assets"
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -77,7 +85,7 @@ static void save_and_exit(void)
 
 int main(int argc, char *argv[])
 {
-    const char *assets = "assets";
+    const char *assets = DEFAULT_ASSETS;
     double after = 2.0;
     bool intro = false, outro = false;
     for (int i = 1; i < argc; i++) {
@@ -103,8 +111,13 @@ int main(int argc, char *argv[])
             assets = argv[i];
     }
 
+#ifdef FALLBACK_ASSETS
+    if (!cd_open_assets(assets) && !cd_open_assets(FALLBACK_ASSETS))
+        return 1;
+#else
     if (!cd_open_assets(assets))
         return 1;
+#endif
     if (!platform_init("Destruction Derby 2", screenshot || vram_dump || wav_path || scripted))
         return 1;
     if (wav_path && !platform_audio_record(wav_path))

@@ -5,6 +5,10 @@
 
 #include "psx/types.h"
 
+/* Before the renames below: some C libraries' stdio.h declares read/write/open (KallistiOS pulls in
+ * unistd.h), and a later include would then declare them under the psx_ names. */
+#include <stdio.h>
+
 /* Psy-Q names that collide with system libraries (kernel32 and the C library here) link under a psx_
  * prefix; game code keeps calling them by their Psy-Q name. */
 #define EnterCriticalSection psx_EnterCriticalSection

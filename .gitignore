@@ -7,5 +7,8 @@
 
 # Build output
 build*/
+dd2.elf
+dd2.cdi
+selfboot/
 
 __pycache__/
