@@ -277,6 +277,39 @@ static int polygon(u_int cmd, const u_int *w, int count)
     int size = 1 + n + (textured ? n : 0) + (gouraud ? n - 1 : 0);
     if (count < size)
         return count;
+#ifdef DD2_HW_RENDER
+    /* Straight into the renderer's vertices: every polygon of a race comes this way. */
+    if (gpu_hw_drawing()) {
+        HwVertex hv[4];
+        u_int hclut = 0, htexpage = st.texpage;
+        int j = 1;
+        for (int k = 0; k < n; k++) {
+            u_int color = (k == 0 || !gouraud) ? cmd : w[j++];
+            hv[k].r = (uint8_t)color;
+            hv[k].g = (uint8_t)(color >> 8);
+            hv[k].b = (uint8_t)(color >> 16);
+            hv[k].x = sign11(w[j]) + st.ofs_x;
+            hv[k].y = sign11(w[j] >> 16) + st.ofs_y;
+            j++;
+            if (textured) {
+                hv[k].u = (uint8_t)w[j];
+                hv[k].v = (uint8_t)(w[j] >> 8);
+                if (k == 0)
+                    hclut = w[j] >> 16;
+                if (k == 1) {
+                    htexpage = (w[j] >> 16) & 0x1ff;
+                    st.texpage = htexpage;
+                }
+                j++;
+            } else {
+                hv[k].u = hv[k].v = 0;
+            }
+        }
+        HwState hs = hw_state(textured, textured && raw, semi, htexpage, hclut);
+        gpu_hw_polygon(&hs, hv, n);
+        return size;
+    }
+#endif
     Vertex v[4];
     u_int clut = 0, texpage = st.texpage;
     int i = 1;
@@ -302,16 +335,6 @@ static int polygon(u_int cmd, const u_int *w, int count)
     }
     if (!textured)
         raw = false;
-#ifdef DD2_HW_RENDER
-    if (gpu_hw_drawing()) {
-        HwState hs = hw_state(textured, raw, semi, textured ? texpage : st.texpage, clut);
-        HwVertex hv[4];
-        for (int k = 0; k < n; k++)
-            hv[k] = hw_vertex(&v[k]);
-        gpu_hw_polygon(&hs, hv, n);
-        return size;
-    }
-#endif
     triangle(v[0], v[1], v[2], gouraud, textured, raw, semi, texpage, clut);
     if (quad)
         triangle(v[1], v[2], v[3], gouraud, textured, raw, semi, texpage, clut);

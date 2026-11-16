@@ -14,7 +14,9 @@ OBJS := $(SRCS:%.c=$(BUILD)/%.o)
 
 CSTD = -std=c11
 WARN = -Wall -Wextra -Wno-unused-parameter
-OPT ?= -O2
+# Link-time optimisation lets the hot paths inline across files (the GPU packet decoder into the PVR
+# renderer, the face handlers into the GTE).
+OPT ?= -O2 -flto=auto
 # DD2_PROFILE=0 drops the on-screen timing line.
 DD2_PROFILE ?= 1
 # DD2_HW_RENDER=0 draws everything in software (the reference look, very slow).
@@ -46,10 +48,10 @@ $(BUILD)/src/platform/platform_kos.o $(BUILD)/src/platform/kos_gpu.o $(BUILD)/sr
 
 # The GTE runs for every vertex: -O3 inlines and unrolls its rows (measured on the SH simulator: 423 ->
 # 365 instructions per RTPS).
-$(BUILD)/src/psx/gte.o: OPT = -O3
+$(BUILD)/src/psx/gte.o: OPT = -O3 -flto=auto
 
 $(TARGET): $(OBJS)
-	kos-cc -o $@ $(OBJS) -lm
+	kos-cc -O2 -flto=auto -o $@ $(OBJS) -lm
 
 cdi: $(TARGET)
 	mkdcdisc -e $(TARGET) -d $(ASSETS) -n "Destruction Derby 2" -o dd2.cdi
