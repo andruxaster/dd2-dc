@@ -394,7 +394,7 @@ static int envelope_advance(Voice *v, int n)
         done++;
         if (v->phase == ENV_OFF)
             return done;
-        if (v->phase != phase || v->level != level || v->env_counter == 0)
+        if (v->phase != phase || v->level != level)
             continue; /* a step or a new phase: the next tick is worked out afresh */
         bool exponential, decrease;
         int shift, step_bits;
@@ -405,6 +405,14 @@ static int envelope_advance(Voice *v, int n)
         envelope_rate(v, exponential, decrease, shift, step_bits, &step, &increment);
         if (increment == 0) {
             done = n; /* never steps */
+            break;
+        }
+        if (v->env_counter == 0) {
+            /* It stepped without moving (held at 0 or 7FFFh, or a step that rounds to 0): with the same
+             * level every later step does the same, so only the counter moves, round its period. */
+            uint32_t period = (0x8000u + increment - 1) / increment;
+            v->env_counter = (uint32_t)(n - done) % period * increment;
+            done = n;
             break;
         }
         /* Ticks before the one whose increment sets bit 15. */
