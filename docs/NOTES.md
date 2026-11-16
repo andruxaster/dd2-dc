@@ -56,6 +56,11 @@ been checked against the real game yet. Differences in the code are marked `PORT
 - The statistics pages number the seasons from `seasons_played + 1` once more than five were played (the oldest
   kept is `seasons_played - 3`).
 - `rand` is the BIOS generator and the game never seeds it.
+- The distant car model (`SECTION_CAR_FAR`, drawn beyond z 5000) has a flat rear: its bumper quad maps a
+  2-texel strip (page 0x0d, v 192..193) through the car's `SMCL..B` CLUT, entries 7 and 8. For several paints
+  entry 8 is light grey, so far yellow or red cars show a grey rectangle at the back until the near model
+  takes over. Checked against `Apply_Car_Part_Cluts` (0x80034AB4), its table at 0x800708F8 and the 0x1388
+  switch in `Draw_Car`; the software reference and the PVR path draw it the same.
 
 ## Port deviations (`PORT:`)
 
@@ -134,6 +139,7 @@ been checked against the real game yet. Differences in the code are marked `PORT
 - Compare the music and XA clipping (CdMix 255) by ear.
 - Whether a hit computer car or another car shows the dent (shared mesh, above).
 - Debris and lost parts were seen in a run (a bonnet flies off) but not compared.
+- The grey rear of distant cars (above) in DuckStation, to see it with the original GPU.
 - The boot seed of `rand` in `psx/libc.c` (0x24040001) is unverified.
 - Front-end screens written but only partly tried by hand: race mode/type, car and track select, CD player,
   controller and sound config, centre screen, info menu, fastest laps, credits, name entry and cheat names.
