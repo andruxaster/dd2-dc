@@ -178,7 +178,8 @@ void Buffer_Load(uint8_t *dest, void (*progress)(int))
 }
 
 /* With `shrink`, the file's own buffer is cut to what the handler keeps. The original ignores
- * realloc's result (it shrinks in place); the C library may move the block, so keep it. */
+ * realloc's result: the heap shrinks in place (heap_realloc does too, as texture_table_cursor points into
+ * the kept part). */
 uint32_t dispatch_file_record(FileRecord *record, int shrink)
 {
     FileFunc handler = File_Func_List[(record->info >> FILE_TYPE_SHIFT) & FILE_TYPE_MASK];

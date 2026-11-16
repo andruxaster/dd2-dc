@@ -365,7 +365,9 @@ void Init_Primitive_Buffer(int32_t size)
 {
     size *= PRIM_SIZE_SCALE;
 #ifdef DD2_FULL_SCENERY
-    size *= 4; /* PORT: with the whole track resident, more objects are in view at once */
+    /* PORT: with the whole track resident, more objects are in view at once (a demo race peaked at
+     * 552 KB of the 1 MB on a 64-bit desktop). */
+    size *= 2;
 #endif
     prim_buffer[0] = MPE_malloc((size_t)size);
     prim_buffer[1] = MPE_malloc((size_t)size);

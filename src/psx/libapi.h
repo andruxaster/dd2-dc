@@ -22,8 +22,12 @@
 int EnterCriticalSection(void);
 void ExitCriticalSection(void);
 
-/* The port allocates with the C library; the PSX heap area is never handed to malloc. */
+/* The heap: blocks from the C library (the PSX heap area is never used); InitHeap frees every block
+ * allocated since, as resetting the PSX heap drops them. */
 void InitHeap(u_long *head, u_long size);
+void *heap_alloc(size_t size);
+void heap_free(void *p);
+void *heap_realloc(void *p, size_t size);
 
 /* Events: opened for a class (desc) and kind (spec); DeliverEvent marks the open ones that match, and
  * TestEvent reports and clears that once. */
