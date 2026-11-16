@@ -4,7 +4,8 @@ Usage: python make_assets.py <disc.cue> <assets dir>
 
 - the data track's files go to the assets folder; Form 2 files (.STR video, .XA audio) stay
   in raw 2352-byte sectors so they can be streamed like from the disc
-- CD audio tracks go to music/trackNN.wav (44.1 kHz 16-bit stereo, exactly the CD data)
+- CD audio tracks go to music/trackNN.wav (44.1 kHz 16-bit stereo, exactly the CD data), from a .bin per
+  track (Redump) or one .bin for the whole disc
 - trailing dots are dropped from names ("DIRINFO." -> "DIRINFO"); Windows can't keep them
 - the empty DD2_MUS placeholders (directory entries pointing at the audio tracks) are skipped
 """
@@ -21,7 +22,7 @@ PREGAP = 150  # INDEX 00 to INDEX 01 of each audio track: 2 seconds of silence i
 
 
 def parse_cue(path):
-    """[(file path, track number, is audio)] in disc order."""
+    """[{file, number, audio, index: {n: sector in its file}}] in disc order."""
     base = os.path.dirname(path)
     tracks, current = [], None
     for line in open(path, encoding="utf-8", errors="replace"):
@@ -30,8 +31,23 @@ def parse_cue(path):
             current = os.path.join(base, m.group(1))
         m = re.match(r"\s*TRACK (\d+) (\S+)", line)
         if m:
-            tracks.append((current, int(m.group(1)), m.group(2) == "AUDIO"))
+            tracks.append({"file": current, "number": int(m.group(1)), "audio": m.group(2) == "AUDIO", "index": {}})
+        m = re.match(r"\s*INDEX (\d+) (\d+):(\d+):(\d+)", line)
+        if m and tracks:
+            mm, ss, ff = int(m.group(2)), int(m.group(3)), int(m.group(4))
+            tracks[-1]["index"][int(m.group(1))] = (mm * 60 + ss) * 75 + ff
     return tracks
+
+
+def track_span(tracks, i):
+    """(first, end) sectors of track i's audio (INDEX 01 on) in its file; end None = to the end of it."""
+    t = tracks[i]
+    first = t["index"].get(1, PREGAP)
+    end = None
+    if i + 1 < len(tracks) and tracks[i + 1]["file"] == t["file"]:
+        nxt = tracks[i + 1]["index"]
+        end = nxt.get(0, nxt.get(1))
+    return first, end
 
 
 def read_sector(f, lba):
@@ -80,10 +96,10 @@ def walk(f, lba, size, out_dir, rel, written):
         written.append(rel + name)
 
 
-def write_wav(src, dst):
+def write_wav(src, first, end, dst):
     with open(src, "rb") as f:
-        f.seek(PREGAP * RAW)
-        pcm = f.read()
+        f.seek(first * RAW)
+        pcm = f.read() if end is None else f.read((end - first) * RAW)
     with open(dst, "wb") as o:
         o.write(b"RIFF" + struct.pack("<I", 36 + len(pcm)) + b"WAVE")
         o.write(b"fmt " + struct.pack("<IHHIIHH", 16, 1, 2, 44100, 44100 * 4, 4, 16))
@@ -96,15 +112,17 @@ def main():
     tracks = parse_cue(cue)
     os.makedirs(os.path.join(out_dir, "music"), exist_ok=True)
     written = []
-    data_file = tracks[0][0]
+    data_file = tracks[0]["file"]
     with open(data_file, "rb") as f:
         pvd = read_sector(f, 16)[DATA_OFF:DATA_OFF + 2048]
         root = pvd[156:156 + 34]
         walk(f, struct.unpack_from("<I", root, 2)[0], struct.unpack_from("<I", root, 10)[0], out_dir, "", written)
     print("files:", " ".join(written))
-    for path, number, audio in tracks:
-        if audio:
-            seconds = write_wav(path, os.path.join(out_dir, "music", f"track{number:02d}.wav"))
+    for i, t in enumerate(tracks):
+        if t["audio"]:
+            first, end = track_span(tracks, i)
+            number = t["number"]
+            seconds = write_wav(t["file"], first, end, os.path.join(out_dir, "music", f"track{number:02d}.wav"))
             print(f"music/track{number:02d}.wav  {seconds // 60}:{seconds % 60:02d}")
 
 
