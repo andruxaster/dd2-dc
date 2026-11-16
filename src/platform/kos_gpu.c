@@ -233,12 +233,23 @@ static int texture_for(const HwState *s, int variant, int u0, int v0, int u1, in
         depth = 2;
     unsigned page = (s->texpage & 0x1f) | (unsigned)depth << 7;
     unsigned clut = depth < 2 ? s->clut : 0;
+    /* Neighbouring primitives mostly share a block. */
+    static int last = -1;
+    if (last >= 0) {
+        Texture *t = &textures[last];
+        if (t->used && !t->stale && t->page == page && t->clut == clut && t->tw == s->tw && t->variant == variant &&
+            t->bu <= u0 && u1 < t->bu + t->bw && t->bv <= v0 && v1 < t->bv + t->bh) {
+            t->last_use = frame_counter;
+            return last;
+        }
+    }
     unsigned bucket = bucket_of(page, clut, s->tw, variant);
     for (int i = buckets[bucket]; i >= 0; i = textures[i].next) {
         Texture *t = &textures[i];
         if (!t->stale && t->page == page && t->clut == clut && t->tw == s->tw && t->variant == variant && t->bu <= u0 &&
             u1 < t->bu + t->bw && t->bv <= v0 && v1 < t->bv + t->bh) {
             t->last_use = frame_counter;
+            last = i;
             return i;
         }
     }
@@ -291,6 +302,7 @@ static int texture_for(const HwState *s, int variant, int u0, int v0, int u1, in
     t->cy = (int)(clut >> 6 & 0x1ff);
     t->cx1 = depth < 2 ? t->cx0 + (depth == 0 ? 16 : 256) : t->cx0;
     convert_texture(t);
+    last = pick;
     return pick;
 }
 
@@ -313,20 +325,28 @@ void kos_gpu_stats(int *converted, int *failed)
 
 /* ---- recording ---- */
 
+/* Compiled headers by what decides them (list, texture block, blend mode): a scene switches between a
+ * few dozen, and compiling one each time cost more than drawing its polygon. */
+#define HEADER_CACHE 64
+
 static pvr_poly_hdr_t header(pvr_list_t list, int tex, int mode)
 {
-    static bool have_last;
-    static pvr_list_t last_list;
-    static int last_tex, last_mode;
-    static pvr_ptr_t last_ptr;
-    static pvr_poly_hdr_t last;
+    static struct {
+        bool used;
+        pvr_list_t list;
+        pvr_ptr_t ptr;
+        int w, h, mode;
+        pvr_poly_hdr_t hdr;
+    } cache[HEADER_CACHE];
     pvr_ptr_t ptr = tex >= 0 ? textures[tex].ptr : NULL;
-    if (have_last && list == last_list && tex == last_tex && mode == last_mode && ptr == last_ptr)
-        return last;
+    int w = tex >= 0 ? textures[tex].bw : 0, h = tex >= 0 ? textures[tex].bh : 0;
+    unsigned slot = ((unsigned)((uintptr_t)ptr >> 5) ^ (unsigned)list * 7u ^ (unsigned)(mode + 1) * 13u) % HEADER_CACHE;
+    if (cache[slot].used && cache[slot].list == list && cache[slot].ptr == ptr && cache[slot].w == w &&
+        cache[slot].h == h && cache[slot].mode == mode)
+        return cache[slot].hdr;
     pvr_poly_cxt_t cxt;
     if (tex >= 0)
-        pvr_poly_cxt_txr(&cxt, list, PVR_TXRFMT_ARGB1555 | PVR_TXRFMT_NONTWIDDLED, textures[tex].bw,
-                         textures[tex].bh, textures[tex].ptr, PVR_FILTER_NONE);
+        pvr_poly_cxt_txr(&cxt, list, PVR_TXRFMT_ARGB1555 | PVR_TXRFMT_NONTWIDDLED, w, h, ptr, PVR_FILTER_NONE);
     else
         pvr_poly_cxt_col(&cxt, list);
     cxt.gen.culling = PVR_CULLING_NONE;
@@ -339,13 +359,14 @@ static pvr_poly_hdr_t header(pvr_list_t list, int tex, int mode)
         default: cxt.blend.src = PVR_BLEND_ZERO; cxt.blend.dst = PVR_BLEND_INVDESTCOLOR; break;
         }
     }
-    pvr_poly_compile(&last, &cxt);
-    have_last = true;
-    last_list = list;
-    last_tex = tex;
-    last_mode = mode;
-    last_ptr = ptr;
-    return last;
+    cache[slot].used = true;
+    cache[slot].list = list;
+    cache[slot].ptr = ptr;
+    cache[slot].w = w;
+    cache[slot].h = h;
+    cache[slot].mode = mode;
+    pvr_poly_compile(&cache[slot].hdr, &cxt);
+    return cache[slot].hdr;
 }
 
 /* Texture coordinates of the primitive being added: texel (u, v) is at ((u - u0) * su, (v - v0) * sv). */

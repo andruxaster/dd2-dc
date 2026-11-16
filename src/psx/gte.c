@@ -26,10 +26,12 @@ static int64_t check_mac(int i, int64_t v)
     return v;
 }
 
-static int32_t set_mac(int i, int64_t v, int shift)
+/* sf selects the >> 12. Shifts by a constant: a 64-bit shift by a variable is a library call on 32-bit
+ * CPUs (the SH4), and these run for every vertex. */
+static int32_t set_mac(int i, int64_t v, int sf)
 {
     check_mac(i, v);
-    gte.mac[i] = (int32_t)(v >> shift);
+    gte.mac[i] = (int32_t)(sf ? v >> 12 : v);
     return gte.mac[i];
 }
 
@@ -144,6 +146,7 @@ static void set_ir0(int64_t mac0)
 /* ---- the GTE's division: unsigned Newton-Raphson with a reciprocal table ---- */
 
 static uint8_t unr_table[0x101];
+static uint8_t leading_zeros[0x100]; /* of a byte, 8 for 0 */
 static int unr_ready;
 
 static uint32_t divide(uint16_t h, uint16_t sz3)
@@ -153,37 +156,47 @@ static uint32_t divide(uint16_t h, uint16_t sz3)
             int v = (0x40000 / (i + 0x100) + 1) / 2 - 0x101;
             unr_table[i] = (uint8_t)(v < 0 ? 0 : v);
         }
+        for (int i = 0; i < 0x100; i++) {
+            int z = 0;
+            while (z < 8 && !(i & (0x80 >> z)))
+                z++;
+            leading_zeros[i] = (uint8_t)z;
+        }
         unr_ready = 1;
     }
     if ((uint32_t)h >= (uint32_t)sz3 * 2) {
         set_flag(17);
         return 0x1ffff;
     }
-    int z = 0;
-    while (z < 16 && !(sz3 & (0x8000 >> z)))
-        z++;
-    uint64_t n = (uint64_t)h << z;
+    /* sz3 > h / 2 here, so it isn't 0. */
+    int z = sz3 >> 8 ? leading_zeros[sz3 >> 8] : 8 + leading_zeros[sz3];
+    uint32_t n = (uint32_t)h << z; /* h < 2 * sz3, so below 2^17 << (16 - bits of sz3): 32 bits */
     uint32_t d = (uint32_t)sz3 << z;
     uint32_t u = unr_table[(d - 0x7fc0) >> 7] + 0x101;
     d = (0x2000080 - d * u) >> 8;
     d = (0x0000080 + d * u) >> 8;
-    uint64_t q = (n * d + 0x8000) >> 16;
+    uint64_t q = ((uint64_t)n * d + 0x8000) >> 16;
     return q > 0x1ffff ? 0x1ffff : (uint32_t)q;
 }
 
 /* ---- transforms ---- */
 
+/* Each 16 x 16-bit product fits 32 bits; only the sums need 64. On 32-bit CPUs that is a plain multiply
+ * per term instead of a wide one. */
+static int64_t row_sum(int32_t t, const int16_t m[3], int32_t x, int32_t y, int32_t z)
+{
+    return (int64_t)t * 4096 + (int64_t)(m[0] * x) + (int64_t)(m[1] * y) + (int64_t)(m[2] * z);
+}
+
 static void rtp(int v, int sf, int last)
 {
-    int shift = sf ? 12 : 0;
-    int64_t x = gte.vx[v], y = gte.vy[v], z = gte.vz[v];
-    for (int i = 0; i < 3; i++) {
-        int64_t sum = ((int64_t)gte.tr[i] << 12) + gte.rt[i][0] * x + gte.rt[i][1] * y + gte.rt[i][2] * z;
-        set_mac(i + 1, sum, shift);
-    }
+    int32_t x = gte.vx[v], y = gte.vy[v], z = gte.vz[v];
+    for (int i = 0; i < 3; i++)
+        set_mac(i + 1, row_sum(gte.tr[i], gte.rt[i], x, y, z), sf);
     set_ir_from_mac(0);
     push_sz(gte.mac[3] >> (sf ? 0 : 12));
-    uint32_t n = divide(gte.h, gte.sz[3]);
+    /* n is at most 1FFFFh: as a signed 32-bit factor the products are one widening multiply. */
+    int32_t n = (int32_t)divide(gte.h, gte.sz[3]);
     int16_t sx = lim_sxy(14, set_mac0((int64_t)n * gte.ir[1] + gte.ofx) >> 16);
     int16_t sy = lim_sxy(13, set_mac0((int64_t)n * gte.ir[2] + gte.ofy) >> 16);
     gte_push_sxy(sx, sy);
@@ -245,13 +258,10 @@ void gte_op_avsz4(void)
 }
 
 /* MAC = (T * 0x1000 + M * V) >> sf*12, IR = lim(MAC) */
-static void mat_vec(const int16_t m[3][3], const int32_t *t, int64_t vx, int64_t vy, int64_t vz, int sf, int lm)
+static void mat_vec(const int16_t m[3][3], const int32_t *t, int32_t vx, int32_t vy, int32_t vz, int sf, int lm)
 {
-    int shift = sf ? 12 : 0;
-    for (int i = 0; i < 3; i++) {
-        int64_t sum = (t ? (int64_t)t[i] << 12 : 0) + m[i][0] * vx + m[i][1] * vy + m[i][2] * vz;
-        set_mac(i + 1, sum, shift);
-    }
+    for (int i = 0; i < 3; i++)
+        set_mac(i + 1, row_sum(t ? t[i] : 0, m[i], vx, vy, vz), sf);
     set_ir_from_mac(lm);
 }
 
@@ -261,7 +271,7 @@ void gte_op_mvmva(int sf, int lm, int matrix, int vector, int translation)
     static const int32_t zero[3] = {0, 0, 0};
     const int16_t(*m)[3] = matrix == 0 ? gte.rt : matrix == 1 ? gte.llm : gte.lcm;
     const int32_t *t = translation == 0 ? gte.tr : translation == 1 ? gte.bk : translation == 2 ? gte.fc : zero;
-    int64_t x, y, z;
+    int32_t x, y, z;
     if (vector < 3) {
         x = gte.vx[vector];
         y = gte.vy[vector];
@@ -278,11 +288,10 @@ void gte_op_mvmva(int sf, int lm, int matrix, int vector, int translation)
 void gte_op_op(int sf, int lm)
 {
     gte.flag = 0;
-    int shift = sf ? 12 : 0;
     int64_t d1 = gte.rt[0][0], d2 = gte.rt[1][1], d3 = gte.rt[2][2];
-    set_mac(1, gte.ir[3] * d2 - gte.ir[2] * d3, shift);
-    set_mac(2, gte.ir[1] * d3 - gte.ir[3] * d1, shift);
-    set_mac(3, gte.ir[2] * d1 - gte.ir[1] * d2, shift);
+    set_mac(1, gte.ir[3] * d2 - gte.ir[2] * d3, sf);
+    set_mac(2, gte.ir[1] * d3 - gte.ir[3] * d1, sf);
+    set_mac(3, gte.ir[2] * d1 - gte.ir[1] * d2, sf);
     set_ir_from_mac(lm);
     finish_flags();
 }
@@ -290,9 +299,8 @@ void gte_op_op(int sf, int lm)
 void gte_op_sqr(int sf)
 {
     gte.flag = 0;
-    int shift = sf ? 12 : 0;
     for (int i = 1; i <= 3; i++)
-        set_mac(i, (int64_t)gte.ir[i] * gte.ir[i], shift);
+        set_mac(i, (int64_t)gte.ir[i] * gte.ir[i], sf);
     set_ir_from_mac(1);
     finish_flags();
 }
@@ -302,11 +310,10 @@ void gte_op_sqr(int sf)
 /* MAC = MAC + (FC - MAC) * IR0, as the hardware does it: IR = lim((FC << 12 - MAC) >> sf*12). */
 static void interpolate_far(int64_t mac[3], int sf)
 {
-    int shift = sf ? 12 : 0;
     for (int i = 0; i < 3; i++) {
         int64_t v = ((int64_t)gte.fc[i] << 12) - mac[i];
         check_mac(i + 1, v);
-        gte.ir[i + 1] = lim_ir(i + 1, (int32_t)(v >> shift), 0);
+        gte.ir[i + 1] = lim_ir(i + 1, (int32_t)(sf ? v >> 12 : v), 0);
     }
     for (int i = 0; i < 3; i++)
         mac[i] = check_mac(i + 1, (int64_t)gte.ir[i + 1] * gte.ir[0] + mac[i]);
@@ -314,9 +321,8 @@ static void interpolate_far(int64_t mac[3], int sf)
 
 static void finish_color(int64_t mac[3], int sf, int lm)
 {
-    int shift = sf ? 12 : 0;
     for (int i = 0; i < 3; i++)
-        set_mac(i + 1, mac[i], shift);
+        set_mac(i + 1, mac[i], sf);
     set_ir_from_mac(lm);
     push_color();
 }
@@ -342,7 +348,7 @@ static void normal_color(int v, int sf, int mode)
     int64_t mac[3];
     if (mode == COLOR_PLAIN) {
         for (int i = 0; i < 3; i++)
-            mac[i] = (int64_t)gte.mac[i + 1] << (sf ? 12 : 0);
+            mac[i] = (sf ? (int64_t)gte.mac[i + 1] * 4096 : (int64_t)gte.mac[i + 1]);
     } else {
         color_times_ir(mac, gte.rgbc);
         if (mode == COLOR_DEPTH)
@@ -433,7 +439,7 @@ void gte_op_gpl(int sf)
     gte.flag = 0;
     int64_t mac[3];
     for (int i = 0; i < 3; i++)
-        mac[i] = check_mac(i + 1, ((int64_t)gte.mac[i + 1] << (sf ? 12 : 0)) + (int64_t)gte.ir[i + 1] * gte.ir[0]);
+        mac[i] = check_mac(i + 1, ((sf ? (int64_t)gte.mac[i + 1] * 4096 : (int64_t)gte.mac[i + 1])) + (int64_t)gte.ir[i + 1] * gte.ir[0]);
     finish_color(mac, sf, 0);
     finish_flags();
 }
