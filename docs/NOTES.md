@@ -64,6 +64,13 @@ been checked against the real game yet. Differences in the code are marked `PORT
 
 ## Port deviations (`PORT:`)
 
+- Dreamcast (`DD2_FULL_SCENERY`, on by default in `Makefile.dc`): every scenery block of a track is unpacked
+  at the start (28 to 40 blocks, 16 KB each) instead of 14 streamed in as the camera passes strips, so
+  scenery no longer appears just ahead. It is drawn to depth C000h instead of 8000h, with the fog moved
+  out by the same half (2580h to 48000). Faces past 7FFFh saturate IR3, which the race clip mask now lets
+  through (as the bowls' does); the OT grows to 4800h slots (AVSZ4 reaches 3FFFh) and `link_prim` drops a
+  face deeper than the OT. The primitive buffer is four times larger. Lateral IR1/IR2 still saturate past
+  7FFFh, so far objects at the screen's edges can still be culled.
 - Dreamcast (`DD2_FAST_GTE`, on by default in `Makefile.dc`): RTPS/RTPT project in single-precision floats
   (`gte.c`). Against the exact arithmetic on 200,000 random vertices: SX or SY one off in about 2%, SZ in
   0.06%, never more than one; the flags differed 7 times (values on a clamp edge). The desktop build stays

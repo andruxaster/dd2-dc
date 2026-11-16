@@ -63,8 +63,6 @@ const int16_t light_colours[12][4] = { /* by level - 1 */
     {4096, 4096, 4096, 0}, {0, 0, 0, 0}, {4096, 4096, 4096, 0}, {4096, 4096, 4096, 0},
     {4096, 4096, 4096, 0}, {4096, 4096, 4096, 0}, {4096, 4096, 4096, 0}, {2, 0, 1, 0},
 };
-#define FOG_NEAR 0x1900
-#define FOG_FAR 32000
 
 MATRIX scene_colour_matrix = {{{4096, 0, 0}, {0, 4096, 0}, {0, 0, 4096}}, {0, 0, 0}}; /* 0x8006F7A4 */
 MATRIX scene_light_matrix = {{{0x830, 0x830, 0}, {0, 0, 0}, {0, 0, 0}}, {0, 0, 0}};     /* 0x8006F7C4 */
@@ -267,6 +265,7 @@ static void free_block_objects(int slot)
     scene_block_id[slot] = BLOCK_FREE;
 }
 
+#ifndef DD2_FULL_SCENERY
 static int find_block(const int32_t *ids, int id)
 {
     int i;
@@ -275,6 +274,7 @@ static int find_block(const int32_t *ids, int id)
             break;
     return i;
 }
+#endif
 
 /* Unpacks the rest of the block being streamed in, and makes its objects. */
 static void finish_decrunch(void)
@@ -303,6 +303,7 @@ static void start_decrunch(int slot, int id, uint16_t chunk)
  * behind goes and the one ahead starts unpacking, a piece each frame. */
 void Finish_Object_Block_Decrunch(void)
 {
+#ifndef DD2_FULL_SCENERY /* otherwise everything was unpacked at the start */
     const TrackFd *fd = camera_fd_pt;
     if (current_level >= FIRST_BOWL_LEVEL)
         return;
@@ -332,12 +333,26 @@ void Finish_Object_Block_Decrunch(void)
             decrunch_active = 0;
         }
     }
+#endif
 }
 
 /* Which blocks are loaded when a race starts: replays the load and unload events of the strips
  * leading up to the camera, then unpacks the resulting blocks at once. */
 static void Object_Decompression(void)
 {
+#ifdef DD2_FULL_SCENERY
+    /* Section 0 starts with the blocks' offsets, so the first offset tells how many there are. */
+    int32_t first;
+    memcpy(&first, level_data_section(0), sizeof(first));
+    int blocks = first / 4 < SCENE_BLOCKS ? first / 4 : SCENE_BLOCKS;
+    for (int i = 0; i < SCENE_BLOCKS; i++)
+        scene_block_id[i] = BLOCK_FREE;
+    for (int i = 0; i < blocks; i++) {
+        start_decrunch(i, i, SCENE_BLOCK_SIZE);
+        finish_decrunch();
+        decrunch_active = 0;
+    }
+#else
     static int32_t ring[WARM_UP_STRIPS]; /* 0x80080154 */
     int32_t wanted[SCENE_BLOCKS];
     for (int i = SCENE_BLOCKS - 1; i >= 0; i--)
@@ -372,6 +387,7 @@ static void Object_Decompression(void)
         finish_decrunch();
         decrunch_active = 0;
     }
+#endif
 }
 
 /* Bowls have all their scenery resident: the blocks follow one another unpacked in section 0, and a

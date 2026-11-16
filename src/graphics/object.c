@@ -364,6 +364,9 @@ void Set_Depth_Cue(int32_t near_z, int32_t far_z, const uint8_t *rgb)
 void Init_Primitive_Buffer(int32_t size)
 {
     size *= PRIM_SIZE_SCALE;
+#ifdef DD2_FULL_SCENERY
+    size *= 4; /* PORT: with the whole track resident, more objects are in view at once */
+#endif
     prim_buffer[0] = MPE_malloc((size_t)size);
     prim_buffer[1] = MPE_malloc((size_t)size);
     prim_block(0)->next = 0;

@@ -314,6 +314,10 @@ static void link_prim(void *p)
 {
     int32_t otz;
     gte_stotz(&otz);
+#ifdef DD2_FULL_SCENERY
+    if (got + otz >= cdb->ot + otsize) /* PORT: deeper than the OT reaches (scenery beyond the PSX's range) */
+        return;
+#endif
     addPrim(&got[otz], p);
 }
 

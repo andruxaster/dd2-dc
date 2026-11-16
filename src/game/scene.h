@@ -7,7 +7,20 @@
 
 #include <stdint.h>
 
+#ifdef DD2_FULL_SCENERY
+/* PORT: every block of a track stays resident (a track has 28 to 40), so scenery no longer appears
+ * just ahead of the camera as the PSX streamed it in. */
+#define SCENE_BLOCKS 64
+/* PORT: and drawn half as far again (the PSX's 8000h), with the fog moved out to match. */
+#define RACE_FAR_Z 0xc000
+#define FOG_NEAR 0x2580
+#define FOG_FAR 48000
+#else
+#define RACE_FAR_Z 0x8000
+#define FOG_NEAR 0x1900
+#define FOG_FAR 32000
 #define SCENE_BLOCKS 14       /* blocks resident at once */
+#endif
 #define SCENE_BLOCK_SIZE 0x4000
 #define BLOCK_OBJECTS 32
 
