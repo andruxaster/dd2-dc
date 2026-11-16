@@ -16,12 +16,15 @@ static void finish_flags(void)
         gte.flag |= GTE_FLAG_ERROR;
 }
 
-/* MAC1..3 hold 44-bit results: flag overflow (bits 30-28) and underflow (27-25). */
+/* MAC1..3 hold 44-bit results: flag overflow (bits 30-28) and underflow (27-25). The checks look at the
+ * high word only (v >= 2^43 exactly when it is >= 800h): one 32-bit compare instead of a 64-bit one,
+ * for every row of every vertex. */
 static int64_t check_mac(int i, int64_t v)
 {
-    if (v > 0x7ffffffffffLL)
+    int32_t high = (int32_t)(v >> 32);
+    if (high >= 0x800)
         set_flag(31 - i);
-    else if (v < -0x80000000000LL)
+    else if (high < -0x800)
         set_flag(28 - i);
     return v;
 }
@@ -37,12 +40,11 @@ static int32_t set_mac(int i, int64_t v, int sf)
 
 static int32_t set_mac0(int64_t v)
 {
-    if (v > 0x7fffffffLL)
-        set_flag(16);
-    else if (v < -0x80000000LL)
-        set_flag(15);
-    gte.mac[0] = (int32_t)v;
-    return gte.mac[0];
+    int32_t low = (int32_t)(uint32_t)v, high = (int32_t)(v >> 32);
+    if (high != (low < 0 ? -1 : 0)) /* not a 32-bit value */
+        set_flag(high < 0 ? 15 : 16);
+    gte.mac[0] = low;
+    return low;
 }
 
 /* IR1..3 clamp to -0x8000 (0 with lm) .. 0x7fff; bits 24-22. */
@@ -181,18 +183,28 @@ static uint32_t divide(uint16_t h, uint16_t sz3)
 
 /* ---- transforms ---- */
 
-/* Each 16 x 16-bit product fits 32 bits; only the sums need 64. On 32-bit CPUs that is a plain multiply
- * per term instead of a wide one. */
-static int64_t row_sum(int32_t t, const int16_t m[3], int32_t x, int32_t y, int32_t z)
+/* MAC(i) = (T * 1000h + M * V) >> sf*12 with its 44-bit flags, in 32-bit steps: the sum is taken as
+ * floor(sum / 1000h) and its low 12 bits. Each 16 x 16-bit product fits 32 bits, splits exactly into
+ * p >> 12 and p & FFFh, and the 44-bit overflow is the high part leaving 32 bits. A 64-bit sum and
+ * shift cost a 32-bit CPU (the SH4) about 75 instructions a row, for every vertex. */
+static void set_mac_row(int i, int32_t t, const int16_t m[3], int32_t x, int32_t y, int32_t z, int sf)
 {
-    return (int64_t)t * 4096 + (int64_t)(m[0] * x) + (int64_t)(m[1] * y) + (int64_t)(m[2] * z);
+    int32_t p0 = m[0] * x, p1 = m[1] * y, p2 = m[2] * z;
+    int32_t low = (p0 & 0xfff) + (p1 & 0xfff) + (p2 & 0xfff);
+    int32_t q = (p0 >> 12) + (p1 >> 12) + (p2 >> 12) + (low >> 12);
+    uint32_t high = (uint32_t)t + (uint32_t)q; /* floor(sum / 1000h), wrapped to 32 bits */
+    if (q > 0 && (int32_t)high < t)
+        set_flag(31 - i);
+    else if (q < 0 && (int32_t)high > t)
+        set_flag(28 - i);
+    gte.mac[i] = (int32_t)(sf ? high : high << 12 | (uint32_t)(low & 0xfff));
 }
 
 static void rtp(int v, int sf, int last)
 {
     int32_t x = gte.vx[v], y = gte.vy[v], z = gte.vz[v];
     for (int i = 0; i < 3; i++)
-        set_mac(i + 1, row_sum(gte.tr[i], gte.rt[i], x, y, z), sf);
+        set_mac_row(i + 1, gte.tr[i], gte.rt[i], x, y, z, sf);
     set_ir_from_mac(0);
     push_sz(gte.mac[3] >> (sf ? 0 : 12));
     /* n is at most 1FFFFh: as a signed 32-bit factor the products are one widening multiply. */
@@ -261,7 +273,7 @@ void gte_op_avsz4(void)
 static void mat_vec(const int16_t m[3][3], const int32_t *t, int32_t vx, int32_t vy, int32_t vz, int sf, int lm)
 {
     for (int i = 0; i < 3; i++)
-        set_mac(i + 1, row_sum(t ? t[i] : 0, m[i], vx, vy, vz), sf);
+        set_mac_row(i + 1, t ? t[i] : 0, m[i], vx, vy, vz, sf);
     set_ir_from_mac(lm);
 }
 
