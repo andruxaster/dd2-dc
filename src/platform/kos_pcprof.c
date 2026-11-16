@@ -1,8 +1,9 @@
-/* A sampling profiler for the Dreamcast build (DD2_PROFILE): the watchdog timer, as an interval timer,
- * notes where the CPU was 1000 times a second; every 20 seconds the busiest 256-byte stretches of code go
- * to the console as "pcprof <address> <per mille>", to be matched with functions in dd2.elf
- * (sh-elf-nm -n dd2.elf). The TMU channels all belong to KallistiOS. */
-#include <dc/wdt.h>
+/* A sampling profiler for the Dreamcast build (DD2_PROFILE): timer channel 1 notes where the CPU was 1000
+ * times a second; every 20 seconds the busiest 256-byte stretches of code go to the console as
+ * "pcprof <address> <per mille>", to be matched with functions in dd2.elf (sh-elf-nm -n dd2.elf).
+ * KallistiOS only needs channel 1 for nothing but its default handler; the watchdog timer it suggests
+ * instead does not interrupt in emulators such as Flycast. */
+#include <arch/timer.h>
 #include <kos.h>
 #include <stdio.h>
 #include <string.h>
@@ -16,10 +17,10 @@
 static volatile uint32_t counts[BUCKETS];
 static volatile uint32_t samples, outside;
 
-static void sample(void *data)
+static void sample(irq_t source, irq_context_t *context, void *data)
 {
-    (void)data;
-    irq_context_t *context = irq_get_context();
+    (void)source, (void)data;
+    timer_clear(TMU1);
     uint32_t pc = context ? context->pc : 0;
     uint32_t bucket = (pc - CODE_START) >> BUCKET_SHIFT;
     if (bucket < BUCKETS)
@@ -31,7 +32,14 @@ static void sample(void *data)
 
 void kos_pcprof_start(void)
 {
-    wdt_enable_timer(0, 1000, 15, sample, NULL);
+    irq_set_handler(EXC_TMU1_TUNI1, sample, NULL);
+    timer_prime(TMU1, 1000, 1);
+    timer_start(TMU1);
+}
+
+uint32_t kos_pcprof_samples(void)
+{
+    return samples;
 }
 
 /* Prints and clears the counts once enough samples are in. */

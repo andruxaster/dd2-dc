@@ -160,6 +160,7 @@ void kos_gpu_stats(int *converted, int *failed);
 #endif
 void kos_pcprof_start(void);
 void kos_pcprof_poll(void);
+uint32_t kos_pcprof_samples(void);
 #define PROFILE_PERIOD_NS 2000000000ull
 
 static uint64_t profile_ns[PROFILE_PARTS], profile_since;
@@ -196,8 +197,8 @@ void platform_profile_frame(void)
 #endif
     snprintf(profile_line, sizeof(profile_line), "%d.%dfps G%d S%d P%d T%d X%d", fps10 / 10, fps10 % 10,
              pct[PROFILE_GPU], pct[PROFILE_SPU], pct[PROFILE_PRESENT], converted, failed);
-    printf("dd2 profile: %s (%% of time: G gpu, S spu, P present; T textures made, X primitives dropped)\n",
-           profile_line);
+    printf("dd2 profile: %s C%lu (%% of time: G gpu, S spu, P present; T textures made, X primitives dropped; "
+           "C profiler samples)\n", profile_line, (unsigned long)kos_pcprof_samples());
     profile_frames = 0;
     profile_since = now;
 }
