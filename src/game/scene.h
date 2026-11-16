@@ -11,10 +11,11 @@
 /* PORT: every block of a track stays resident (a track has 28 to 40), so scenery no longer appears
  * just ahead of the camera as the PSX streamed it in. */
 #define SCENE_BLOCKS 64
-/* PORT: and drawn half as far again (the PSX's 8000h), with the fog moved out to match. */
-#define RACE_FAR_Z 0xc000
-#define FOG_NEAR 0x2580
-#define FOG_FAR 48000
+/* PORT: and drawn a quarter farther than the PSX's 8000h, with the fog moved out to match (half
+ * farther cost the Dreamcast its steady 30 fps). */
+#define RACE_FAR_Z 0xa000
+#define FOG_NEAR 0x1f40
+#define FOG_FAR 40000
 #else
 #define RACE_FAR_Z 0x8000
 #define FOG_NEAR 0x1900
