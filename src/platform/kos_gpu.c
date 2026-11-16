@@ -32,7 +32,7 @@ uint16_t *gpu_vram(void);
 #define SCREEN_W 640.0f
 #define SCREEN_H 480.0f
 #define MAX_SLOTS 3
-#define MAX_PRIMS 4096
+#define MAX_PRIMS 6144 /* a race start with every car in detail went past 4096 */
 #define MAX_TEXTURES 2048
 #define BUCKETS 256
 #define TEXTURE_BUDGET (2560u * 1024u)
