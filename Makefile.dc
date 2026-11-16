@@ -39,6 +39,10 @@ $(BUILD)/%.o: %.c Makefile.dc
 $(BUILD)/src/platform/platform_kos.o $(BUILD)/src/platform/kos_gpu.o $(BUILD)/src/platform/kos_spu.o \
     $(BUILD)/src/platform/kos_pcprof.o: CSTD = -std=gnu11
 
+# The GTE runs for every vertex: -O3 inlines and unrolls its rows (measured on the SH simulator: 423 ->
+# 365 instructions per RTPS).
+$(BUILD)/src/psx/gte.o: OPT = -O3
+
 $(TARGET): $(OBJS)
 	kos-cc -o $@ $(OBJS) -lm
 
