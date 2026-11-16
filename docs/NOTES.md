@@ -84,6 +84,11 @@ been checked against the real game yet. Differences in the code are marked `PORT
   is skipped when the PVR is still busy, never delayed. Sound goes through a ring into a KOS sound stream.
   Memory cards stay in memory (`platform_card_path` returns false; 128 KB does not fit on a VMU). Mapping in
   `README.md`.
+- RTPS/RTPT keep the last results per vertex (`gte.c`, 128 entries) for the current rotation, translation,
+  offsets, projection distance and depth cue: faces share vertices, and about 60% of projections in a race
+  repeat one. Exact (the context is compared at every RTPS/RTPT; fuzzed against the plain version with
+  random context changes). On the SH simulator a repeated vertex costs about 190 instructions, a new one
+  about 490, against 343 before.
 - `Makefile.dc` defines `DD2_SKIP_UNCHANGED_FRAMES` (libgpu does not show a picture again when nothing
   changed VRAM or the display since: the game draws at 30 Hz, the vblank is 60 Hz) and by default
   `DD2_PROFILE` (`psx/profile.h`: game fps and the share of time in the GPU, SPU and present, on screen

@@ -1,5 +1,8 @@
 #include "psx/gte.h"
 
+#include <stddef.h>
+#include <string.h>
+
 GteState gte;
 
 /* ---- saturation and flags ---- */
@@ -168,12 +171,70 @@ static int32_t mac0_of(int64_t v, uint32_t *flag)
     return low;
 }
 
-/* One vertex of RTPS/RTPT, straight through: the same steps as set_mac_row, lim_ir, push_sz, set_mac0,
- * lim_sxy and set_ir0, with the flags gathered in a local and stored once. Called for every vertex the
- * game draws, it was a fifth of the Dreamcast's time with the steps as separate calls. */
-static void rtp(int v, int sf, int last)
+/* What RTPS/RTPT make of one vertex: everything the registers and flags get, with the depth-cue part
+ * (MAC0, IR0 and their flags) apart because only the last vertex stores it. 64 bytes, so an entry is
+ * found with a shift. */
+typedef struct {
+    uint32_t xy, zsf; /* the vertex and sf, the key */
+    uint32_t context; /* the projection context the entry was made in; 0: empty */
+    int32_t mac[3];
+    int16_t ir[3];
+    uint16_t sz;
+    int16_t sx, sy;
+    int16_t ir0, pad;
+    int32_t mac0, mac0_dq;
+    uint32_t flag, flag_dq;
+    uint32_t spare[2];
+} Projected;
+
+_Static_assert(sizeof(Projected) == 64, "Projected");
+
+/* Faces share vertices, so most vertices are projected again moments later with the same matrix: about
+ * three in five in a race. The results are a function of the vertex, sf and the context (the rotation,
+ * translation, offsets, projection distance and depth cue), so a hit gives exactly what the arithmetic
+ * would. The context is compared at each RTPS/RTPT, because the game and libgte write those registers in
+ * many places; it is two runs of words in GteState: RT and TR (with RT's 2 bytes of padding) and OFX to
+ * DQB. */
+#define PROJECTED 128
+#define CONTEXT_A_WORDS 8 /* rt, padding, tr */
+#define CONTEXT_B_WORDS 4 /* ofx, ofy, h and dqa, dqb */
+static Projected projected[PROJECTED];
+static uint32_t context_a[CONTEXT_A_WORDS], context_b[CONTEXT_B_WORDS];
+static uint32_t context_id;
+
+_Static_assert(offsetof(GteState, tr) - offsetof(GteState, rt) == 20 && offsetof(GteState, rt) % 4 == 0,
+               "RT and TR are one run of words");
+_Static_assert(offsetof(GteState, dqb) - offsetof(GteState, ofx) == 12 && offsetof(GteState, ofx) % 4 == 0,
+               "OFX to DQB are one run of words");
+
+static uint32_t word_at(const void *base, int i)
 {
-    int32_t x = gte.vx[v], y = gte.vy[v], z = gte.vz[v];
+    uint32_t w;
+    memcpy(&w, (const uint8_t *)base + 4 * i, sizeof(w));
+    return w;
+}
+
+static void check_context(void)
+{
+    uint32_t diff = context_id == 0;
+    for (int i = 0; i < CONTEXT_A_WORDS; i++)
+        diff |= word_at(gte.rt, i) ^ context_a[i];
+    for (int i = 0; i < CONTEXT_B_WORDS; i++)
+        diff |= word_at(&gte.ofx, i) ^ context_b[i];
+    if (diff == 0)
+        return;
+    memcpy(context_a, gte.rt, sizeof(context_a));
+    memcpy(context_b, &gte.ofx, sizeof(context_b));
+    if (++context_id == 0) { /* wrapped: no entry may match an old context by number */
+        memset(projected, 0, sizeof(projected));
+        context_id = 1;
+    }
+}
+
+/* One vertex straight through: the same steps as set_mac_row, lim_ir, push_sz, set_mac0, lim_sxy and
+ * set_ir0, with the flags gathered in a local. Kept out of line so the hit path stays small. */
+static void project(int32_t x, int32_t y, int32_t z, int sf, Projected *p)
+{
     uint32_t flag = 0, over = 1u << 30, under = 1u << 27, ir_bit = 1u << 24;
     for (int i = 0; i < 3; i++, over >>= 1, under >>= 1, ir_bit >>= 1) {
         const int16_t *m = gte.rt[i];
@@ -187,25 +248,22 @@ static void rtp(int v, int sf, int last)
         else if (q < 0 && (int32_t)high > t)
             flag |= under;
         int32_t mac = (int32_t)(sf ? high : high << 12 | (uint32_t)(low & 0xfff));
-        gte.mac[i + 1] = mac;
+        p->mac[i] = mac;
         int32_t ir = mac < -0x8000 ? -0x8000 : mac > 0x7fff ? 0x7fff : mac;
         if (ir != mac)
             flag |= ir_bit;
-        gte.ir[i + 1] = ir;
+        p->ir[i] = (int16_t)ir;
     }
-    int32_t sz = gte.mac[3] >> (sf ? 0 : 12);
-    gte.sz[0] = gte.sz[1];
-    gte.sz[1] = gte.sz[2];
-    gte.sz[2] = gte.sz[3];
+    int32_t sz = p->mac[2] >> (sf ? 0 : 12);
     if (sz < 0 || sz > 0xffff) {
         flag |= 1u << 18;
         sz = sz < 0 ? 0 : 0xffff;
     }
-    gte.sz[3] = (uint16_t)sz;
+    p->sz = (uint16_t)sz;
     /* n is at most 1FFFFh: as a signed 32-bit factor the products are one widening multiply. */
     int32_t n = (int32_t)divide(gte.h, (uint16_t)sz, &flag);
-    int32_t sx = mac0_of((int64_t)n * gte.ir[1] + gte.ofx, &flag) >> 16;
-    int32_t mac0 = mac0_of((int64_t)n * gte.ir[2] + gte.ofy, &flag);
+    int32_t sx = mac0_of((int64_t)n * p->ir[0] + gte.ofx, &flag) >> 16;
+    int32_t mac0 = mac0_of((int64_t)n * p->ir[1] + gte.ofy, &flag);
     int32_t sy = mac0 >> 16;
     if (sx < -0x400 || sx > 0x3ff) {
         flag |= 1u << 14;
@@ -215,23 +273,58 @@ static void rtp(int v, int sf, int last)
         flag |= 1u << 13;
         sy = sy < -0x400 ? -0x400 : 0x3ff;
     }
-    gte_push_sxy((int16_t)sx, (int16_t)sy);
-    if (last) {
-        mac0 = mac0_of((int64_t)n * gte.dqa + gte.dqb, &flag);
-        int32_t ir0 = mac0 >> 12;
-        if (ir0 < 0 || ir0 > 0x1000) {
-            flag |= 1u << 12;
-            ir0 = ir0 < 0 ? 0 : 0x1000;
-        }
-        gte.ir[0] = ir0;
+    p->sx = (int16_t)sx;
+    p->sy = (int16_t)sy;
+    p->mac0 = mac0;
+    p->flag = flag;
+    uint32_t flag_dq = 0;
+    p->mac0_dq = mac0_of((int64_t)n * gte.dqa + gte.dqb, &flag_dq);
+    int32_t ir0 = p->mac0_dq >> 12;
+    if (ir0 < 0 || ir0 > 0x1000) {
+        flag_dq |= 1u << 12;
+        ir0 = ir0 < 0 ? 0 : 0x1000;
     }
-    gte.mac[0] = mac0;
-    gte.flag |= flag;
+    p->ir0 = (int16_t)ir0;
+    p->flag_dq = flag_dq;
+}
+
+static void rtp(int v, int sf, int last)
+{
+    uint32_t xy = (uint16_t)gte.vx[v] | (uint32_t)(uint16_t)gte.vy[v] << 16;
+    uint32_t zsf = (uint16_t)gte.vz[v] | (uint32_t)sf << 16;
+    uint32_t hash = xy * 0x9e3779b1u ^ zsf * 0x85ebca6bu;
+    Projected *p = &projected[hash >> 25];
+    if (p->xy != xy || p->zsf != zsf || p->context != context_id) {
+        project(gte.vx[v], gte.vy[v], gte.vz[v], sf, p);
+        p->xy = xy;
+        p->zsf = zsf;
+        p->context = context_id;
+    }
+    gte.mac[1] = p->mac[0];
+    gte.mac[2] = p->mac[1];
+    gte.mac[3] = p->mac[2];
+    gte.ir[1] = p->ir[0];
+    gte.ir[2] = p->ir[1];
+    gte.ir[3] = p->ir[2];
+    gte.sz[0] = gte.sz[1];
+    gte.sz[1] = gte.sz[2];
+    gte.sz[2] = gte.sz[3];
+    gte.sz[3] = p->sz;
+    gte_push_sxy(p->sx, p->sy);
+    if (last) {
+        gte.ir[0] = p->ir0;
+        gte.mac[0] = p->mac0_dq;
+        gte.flag |= p->flag | p->flag_dq;
+    } else {
+        gte.mac[0] = p->mac0;
+        gte.flag |= p->flag;
+    }
 }
 
 void gte_op_rtps(int sf)
 {
     gte.flag = 0;
+    check_context();
     rtp(0, sf, 1);
     finish_flags();
 }
@@ -239,6 +332,7 @@ void gte_op_rtps(int sf)
 void gte_op_rtpt(int sf)
 {
     gte.flag = 0;
+    check_context();
     rtp(0, sf, 0);
     rtp(1, sf, 0);
     rtp(2, sf, 1);

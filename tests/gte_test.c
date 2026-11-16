@@ -44,6 +44,35 @@ static void test_projection(void)
     CHECK(flag & GTE_FLAG_DIVIDE, "near vertex did not flag a divide overflow");
 }
 
+/* The same vertex again must see every change of the projection context (rtp keeps recent results):
+ * the translation, written directly as the game does, the screen offset and the projection distance. */
+static void test_projection_context(void)
+{
+    InitGeom();
+    SetGeomOffset(160, 120);
+    SetGeomScreen(1000);
+    SetRotMatrix(&identity);
+    SetTransMatrix(&identity);
+    SVECTOR v = {100, 50, 1000, 0};
+    int32_t sxy, p, flag;
+    RotTransPers(&v, &sxy, &p, &flag);
+    CHECK((int16_t)sxy == 260 && (sxy >> 16) == 170, "first (%d, %d)", (int16_t)sxy, sxy >> 16);
+    gte.tr[0] = 100;
+    RotTransPers(&v, &sxy, &p, &flag);
+    CHECK((int16_t)sxy == 360, "after TR x %d, want 360", (int16_t)sxy);
+    gte.tr[0] = 0;
+    SetGeomOffset(0, 0);
+    RotTransPers(&v, &sxy, &p, &flag);
+    CHECK((int16_t)sxy == 100 && (sxy >> 16) == 50, "after offset (%d, %d), want (100, 50)", (int16_t)sxy, sxy >> 16);
+    SetGeomScreen(500);
+    RotTransPers(&v, &sxy, &p, &flag);
+    CHECK((int16_t)sxy == 50 && (sxy >> 16) == 25, "after h (%d, %d), want (50, 25)", (int16_t)sxy, sxy >> 16);
+    MATRIX turn = {{{0, -4096, 0}, {4096, 0, 0}, {0, 0, 4096}}, {0, 0, 0}};
+    SetRotMatrix(&turn);
+    RotTransPers(&v, &sxy, &p, &flag);
+    CHECK((int16_t)sxy == -25 && (sxy >> 16) == 50, "after rotation (%d, %d), want (-25, 50)", (int16_t)sxy, sxy >> 16);
+}
+
 static void test_nclip_avsz(void)
 {
     InitGeom();
@@ -88,6 +117,7 @@ int main(void)
 {
     test_trig();
     test_projection();
+    test_projection_context();
     test_nclip_avsz();
     test_matrices();
     printf(failures ? "%d failure(s)\n" : "all GTE checks passed\n", failures);
