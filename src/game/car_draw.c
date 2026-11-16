@@ -16,7 +16,13 @@
 #include <stdio.h>
 #include <string.h>
 
+#ifdef DD2_DETAILED_CARS
+/* PORT: the near model at every distance. The distant one's rear is a flat strip of the paint CLUT,
+ * a grey or coloured box on many cars. */
+#define NEAR_Z 0x7fffffff
+#else
 #define NEAR_Z 5000          /* closer than this the near model is drawn, with wheels and shadow */
+#endif
 #define CRITICAL_DAMAGE 0xe64
 #define HALF_DAMAGE 0x732
 

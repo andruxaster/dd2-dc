@@ -64,6 +64,9 @@ been checked against the real game yet. Differences in the code are marked `PORT
 
 ## Port deviations (`PORT:`)
 
+- Dreamcast (`DD2_DETAILED_CARS`, on by default in `Makefile.dc`): computer cars are drawn with the near model
+  (and its wheels and shadow) at every distance, not the distant model past z 5000, whose flat rear shows
+  as a grey or coloured box (see the quirk below).
 - The BIOS heap (`libapi.c`): blocks come from the C library, listed so InitHeap frees them all as the PSX
   heap reset does (each race used to leak its buffers; the Dreamcast ran out of memory after a race).
   Shrinking keeps a block in place, as the game keeps pointers into a file's cut buffer.

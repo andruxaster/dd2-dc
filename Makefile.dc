@@ -27,8 +27,11 @@ DD2_SPU_HW ?= 1
 DD2_FAST_GTE ?= 1
 # DD2_FULL_SCENERY=0 streams the scenery in just ahead of the camera and draws it as far as the PSX did.
 DD2_FULL_SCENERY ?= 1
+# DD2_DETAILED_CARS=0 draws far cars with the PSX's distant model (a flat box for a rear).
+DD2_DETAILED_CARS ?= 1
 DEFS = -DDD2_SKIP_UNCHANGED_FRAMES $(if $(filter 1,$(DD2_FAST_GTE)),-DDD2_FAST_GTE) \
-       $(if $(filter 1,$(DD2_FULL_SCENERY)),-DDD2_FULL_SCENERY) $(if $(filter 1,$(DD2_HW_RENDER)),-DDD2_HW_RENDER) \
+       $(if $(filter 1,$(DD2_FULL_SCENERY)),-DDD2_FULL_SCENERY) \
+       $(if $(filter 1,$(DD2_DETAILED_CARS)),-DDD2_DETAILED_CARS) $(if $(filter 1,$(DD2_HW_RENDER)),-DDD2_HW_RENDER) \
        $(if $(filter 1,$(DD2_SPU_HW)),-DDD2_SPU_HW) $(if $(filter 1,$(DD2_PROFILE)),-DDD2_PROFILE)
 
 all: $(TARGET)
