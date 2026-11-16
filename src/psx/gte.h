@@ -72,6 +72,25 @@ void gte_op_gpl(int sf);
 /* MVMVA: matrix 0 rotation, 1 light, 2 colour; vector 0-2 V0-V2, 3 IR; translation 0 TR, 1 BK, 2 FC, 3 none */
 void gte_op_mvmva(int sf, int lm, int matrix, int vector, int translation);
 
+/* What RTPS/RTPT make of one vertex in the current projection context (rotation, translation, offsets,
+ * projection distance, depth cue): every register and flag they set, the depth-cue part (MAC0, IR0 and
+ * their flags) apart because only the last vertex stores it. A port addition: code that projects the
+ * same vertex for several faces does it once with gte_project, then has gte_rtps_projected or
+ * gte_rtpt_projected set the registers exactly as RTPS/RTPT on those vertices would. */
+typedef struct {
+    int32_t mac[3];
+    int16_t ir[3];
+    uint16_t sz;
+    int16_t sx, sy;
+    int16_t ir0, pad;
+    int32_t mac0, mac0_dq;
+    uint32_t flag, flag_dq;
+} GteProjected;
+
+void gte_project(int16_t x, int16_t y, int16_t z, int sf, GteProjected *out);
+void gte_rtps_projected(const GteProjected *v);
+void gte_rtpt_projected(const GteProjected *v0, const GteProjected *v1, const GteProjected *v2);
+
 /* SXYP/IRGB writes, which have side effects on the FIFOs and IR. */
 void gte_push_sxy(int16_t x, int16_t y);
 void gte_set_irgb(uint32_t v);

@@ -230,12 +230,60 @@ void convert_poly_gt4_lit(int count)
 
 /* ---- face drawing: run every frame, transforming vertices and linking visible packets ---- */
 
+/* Each vertex of the object being drawn is projected once, when a face first needs it, and its result
+ * kept for the other faces that share it (a port addition: the PSX's GTE projected it again for every
+ * face). RTPS/RTPT are then replayed from the results, which sets the GTE exactly as projecting would,
+ * as long as the projection context is the one the results were made in: a new object and the sprite
+ * runs, which change the rotation and translation, start afresh (projection_changed). */
+#define VERTEX_TABLE 2048
+static GteProjected vertex_table[VERTEX_TABLE];
+static uint32_t vertex_made[VERTEX_TABLE]; /* projection_id when the entry was made */
+static uint32_t projection_id = 1;
+
+void projection_changed(void)
+{
+    if (++projection_id == 0) { /* wrapped: no entry may pass for a current one */
+        memset(vertex_made, 0, sizeof(vertex_made));
+        projection_id = 1;
+    }
+}
+
+/* Vertex i of gvertices projected; vertices past the table go through `spare`. */
+static const GteProjected *projected_vertex(int16_t i, GteProjected *spare)
+{
+    const SVECTOR *v = &gvertices[i];
+    if ((uint16_t)i >= VERTEX_TABLE) {
+        gte_project(v->vx, v->vy, v->vz, 1, spare);
+        return spare;
+    }
+    GteProjected *p = &vertex_table[(uint16_t)i];
+    if (vertex_made[(uint16_t)i] != projection_id) {
+        gte_project(v->vx, v->vy, v->vz, 1, p);
+        vertex_made[(uint16_t)i] = projection_id;
+    }
+    return p;
+}
+
+/* As gte_ldv3 and gte_rtpt on vertices a, b and c of gvertices. */
+static void rtpt_vertices(int16_t a, int16_t b, int16_t c)
+{
+    GteProjected spare[3];
+    gte_rtpt_projected(projected_vertex(a, &spare[0]), projected_vertex(b, &spare[1]),
+                       projected_vertex(c, &spare[2]));
+}
+
+/* As gte_ldv0 and gte_rtps on vertex a of gvertices. */
+static void rtps_vertex(int16_t a)
+{
+    GteProjected spare;
+    gte_rtps_projected(projected_vertex(a, &spare));
+}
+
 /* RTPT on three vertices and NCLIP; true when no clip flag is set. Leaves the SXY FIFO and
  * MAC0 (opz) for the caller. */
 static int load_tri(const int16_t *v)
 {
-    gte_ldv3(&gvertices[v[0]], &gvertices[v[1]], &gvertices[v[2]]);
-    gte_rtpt();
+    rtpt_vertices(v[0], v[1], v[2]);
     int32_t flag;
     gte_stflg(&flag);
     gte_nclip();
@@ -255,8 +303,7 @@ static int front_tri(const int16_t *v)
 /* RTPS on the fourth vertex and AVSZ4; true when no clip flag is set. */
 static int fourth_vertex(int16_t v)
 {
-    gte_ldv0(&gvertices[v]);
-    gte_rtps();
+    rtps_vertex(v);
     int32_t flag;
     gte_stflg(&flag);
     gte_avsz4();
@@ -404,8 +451,7 @@ static void text_quad_both(int count, int depth_cue)
             int32_t opz, opz2, flag;
             gte_stopz(&opz);
             gte_stsxy3_ft3(p);
-            gte_ldv0(&gvertices[f->v[3]]);
-            gte_rtps();
+            rtps_vertex(f->v[3]);
             gte_stflg(&flag);
             gte_nclip();
             if ((clip_flag_mask & (uint32_t)flag) == 0) {
@@ -488,8 +534,7 @@ static void text_tri_squash(int count, int depth_cue)
     for (int i = 0; i < count; i++) {
         const FaceText *f = (const FaceText *)gpoly;
         POLY_FT3 *p = (POLY_FT3 *)gprim;
-        gte_ldv3(&gvertices[f->v[0]], &gvertices[f->v[1]], &gvertices[f->v[2]]);
-        gte_rtpt();
+        rtpt_vertices(f->v[0], f->v[1], f->v[2]);
         gte_nclip();
         int32_t opz, otz;
         gte_stopz(&opz);
@@ -517,14 +562,12 @@ static void text_quad_squash(int count, int depth_cue)
     for (int i = 0; i < count; i++) {
         const FaceText *f = (const FaceText *)gpoly;
         POLY_FT4 *p = (POLY_FT4 *)gprim;
-        gte_ldv3(&gvertices[f->v[0]], &gvertices[f->v[1]], &gvertices[f->v[2]]);
-        gte_rtpt();
+        rtpt_vertices(f->v[0], f->v[1], f->v[2]);
         gte_nclip();
         int32_t opz, opz2, otz;
         gte_stopz(&opz);
         short x[4] = {gte.sx[0], gte.sx[1], gte.sx[2], 0}, y[4] = {gte.sy[0], gte.sy[1], gte.sy[2], 0};
-        gte_ldv0(&gvertices[f->v[3]]);
-        gte_rtps();
+        rtps_vertex(f->v[3]);
         gte_nclip();
         gte_stopz(&opz2);
         gte_avsz4();
@@ -869,6 +912,7 @@ static void sprite_run(int count, const MATRIX *centre_matrix, const MATRIX *cor
         gpoly += sizeof(FaceText);
         gprim += sizeof(POLY_FT4);
     }
+    projection_changed(); /* the rotation and translation are the last sprite's now */
 }
 
 void draw_face_sprite(int count) { sprite_run(count, NULL, &sprite_matrix, 0); }        /* 0x800594EC */
@@ -887,11 +931,11 @@ void draw_face_centred_tilt_sprite_dpq(int count) /* 0x8005A388 */
 static void tilt_sprite(int count, int depth_cue)
 {
     gte_SetRotMatrix(&tilt_matrix);
+    projection_changed();
     for (int i = 0; i < count; i++) {
         const FaceText *f = (const FaceText *)gpoly;
         POLY_FT4 *p = (POLY_FT4 *)gprim;
-        gte_ldv3(&gvertices[f->v[0]], &gvertices[f->v[1]], &gvertices[f->v[2]]);
-        gte_rtpt();
+        rtpt_vertices(f->v[0], f->v[1], f->v[2]);
         int32_t flag;
         gte_stflg(&flag);
         if ((clip_flag_mask & (uint32_t)flag) == 0) {

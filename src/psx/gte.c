@@ -107,6 +107,7 @@ void gte_push_sxy(int16_t x, int16_t y)
     gte.sy[2] = y;
 }
 
+#ifndef DD2_FAST_GTE
 /* ---- the GTE's division: unsigned Newton-Raphson with a reciprocal table ---- */
 
 static uint8_t unr_table[0x101];
@@ -143,6 +144,8 @@ static uint32_t divide(uint16_t h, uint16_t sz3, uint32_t *flag)
     return q > 0x1ffff ? 0x1ffff : (uint32_t)q;
 }
 
+#endif
+
 /* ---- transforms ---- */
 
 /* MAC(i) = (T * 1000h + M * V) >> sf*12 with its 44-bit flags, in 32-bit steps: the sum is taken as
@@ -162,6 +165,7 @@ static void set_mac_row(int i, int32_t t, const int16_t m[3], int32_t x, int32_t
     gte.mac[i] = (int32_t)(sf ? high : high << 12 | (uint32_t)(low & 0xfff));
 }
 
+#ifndef DD2_FAST_GTE
 /* MAC0 <- v with its 32-bit overflow flags (16, 15). */
 static int32_t mac0_of(int64_t v, uint32_t *flag)
 {
@@ -170,20 +174,13 @@ static int32_t mac0_of(int64_t v, uint32_t *flag)
         *flag |= high < 0 ? 1u << 15 : 1u << 16;
     return low;
 }
+#endif
 
-/* What RTPS/RTPT make of one vertex: everything the registers and flags get, with the depth-cue part
- * (MAC0, IR0 and their flags) apart because only the last vertex stores it. 64 bytes, so an entry is
- * found with a shift. */
+/* A cached projection: the key, then the result. 64 bytes, so an entry is found with a shift. */
 typedef struct {
-    uint32_t xy, zsf; /* the vertex and sf, the key */
+    uint32_t xy, zsf; /* the vertex and sf */
     uint32_t context; /* the projection context the entry was made in; 0: empty */
-    int32_t mac[3];
-    int16_t ir[3];
-    uint16_t sz;
-    int16_t sx, sy;
-    int16_t ir0, pad;
-    int32_t mac0, mac0_dq;
-    uint32_t flag, flag_dq;
+    GteProjected r;
     uint32_t spare[2];
 } Projected;
 
@@ -231,9 +228,70 @@ static void check_context(void)
     }
 }
 
+#ifdef DD2_FAST_GTE
+/* PORT: the Dreamcast build (DD2_FAST_GTE) projects in single-precision floats, on the SH4's otherwise
+ * idle FPU: screen positions, depths and the depth cue can be one off from the PSX's now and then. The
+ * flags follow the same rules on the rounded values. */
+static int32_t floor_int(float f)
+{
+    int32_t t = (int32_t)f;
+    return (float)t > f ? t - 1 : t;
+}
+
+static int32_t clamp_flag(int32_t v, int32_t lo, int32_t hi, uint32_t bit, uint32_t *flag)
+{
+    if (v < lo) {
+        *flag |= bit;
+        return lo;
+    }
+    if (v > hi) {
+        *flag |= bit;
+        return hi;
+    }
+    return v;
+}
+
+static void project(int32_t x, int32_t y, int32_t z, int sf, GteProjected *p)
+{
+    float fx = (float)x, fy = (float)y, fz = (float)z;
+    float scale = sf ? 1.0f / 4096.0f : 1.0f;
+    uint32_t flag = 0;
+    float mz = 0.0f;
+    for (int i = 0; i < 3; i++) {
+        const int16_t *m = gte.rt[i];
+        float mac = (float)gte.tr[i] * 4096.0f * scale +
+                    ((float)m[0] * fx + (float)m[1] * fy + (float)m[2] * fz) * scale;
+        /* MAC1..3 overflow at 2^43 before the shift: only with translations far beyond the game's. */
+        int32_t v = floor_int(mac);
+        p->mac[i] = v;
+        p->ir[i] = (int16_t)clamp_flag(v, -0x8000, 0x7fff, 1u << (24 - i), &flag);
+        mz = mac;
+    }
+    int32_t sz = clamp_flag(floor_int(sf ? mz : mz * (1.0f / 4096.0f)), 0, 0xffff, 1u << 18, &flag);
+    p->sz = (uint16_t)sz;
+    float n; /* h / sz, the GTE's 16.16 quotient as a fraction */
+    if ((uint32_t)gte.h >= (uint32_t)sz * 2) {
+        flag |= 1u << 17;
+        n = (float)0x1ffff * (1.0f / 65536.0f);
+    } else {
+        n = (float)gte.h / (float)sz;
+    }
+    float py = (float)gte.ofy * (1.0f / 65536.0f) + n * (float)p->ir[1];
+    p->sx = (int16_t)clamp_flag(floor_int((float)gte.ofx * (1.0f / 65536.0f) + n * (float)p->ir[0]), -0x400,
+                                0x3ff, 1u << 14, &flag);
+    p->sy = (int16_t)clamp_flag(floor_int(py), -0x400, 0x3ff, 1u << 13, &flag);
+    p->mac0 = (int32_t)(py * 65536.0f);
+    p->flag = flag;
+    uint32_t flag_dq = 0;
+    float dq = n * 65536.0f * (float)gte.dqa + (float)gte.dqb;
+    p->mac0_dq = (int32_t)dq;
+    p->ir0 = (int16_t)clamp_flag(floor_int(dq * (1.0f / 4096.0f)), 0, 0x1000, 1u << 12, &flag_dq);
+    p->flag_dq = flag_dq;
+}
+#else
 /* One vertex straight through: the same steps as set_mac_row, lim_ir, push_sz, set_mac0, lim_sxy and
  * set_ir0, with the flags gathered in a local. Kept out of line so the hit path stays small. */
-static void project(int32_t x, int32_t y, int32_t z, int sf, Projected *p)
+static void project(int32_t x, int32_t y, int32_t z, int sf, GteProjected *p)
 {
     uint32_t flag = 0, over = 1u << 30, under = 1u << 27, ir_bit = 1u << 24;
     for (int i = 0; i < 3; i++, over >>= 1, under >>= 1, ir_bit >>= 1) {
@@ -288,18 +346,11 @@ static void project(int32_t x, int32_t y, int32_t z, int sf, Projected *p)
     p->flag_dq = flag_dq;
 }
 
-static void rtp(int v, int sf, int last)
+#endif
+
+/* RTPS/RTPT's register writes for one projected vertex. */
+static void apply(const GteProjected *p, int last)
 {
-    uint32_t xy = (uint16_t)gte.vx[v] | (uint32_t)(uint16_t)gte.vy[v] << 16;
-    uint32_t zsf = (uint16_t)gte.vz[v] | (uint32_t)sf << 16;
-    uint32_t hash = xy * 0x9e3779b1u ^ zsf * 0x85ebca6bu;
-    Projected *p = &projected[hash >> 25];
-    if (p->xy != xy || p->zsf != zsf || p->context != context_id) {
-        project(gte.vx[v], gte.vy[v], gte.vz[v], sf, p);
-        p->xy = xy;
-        p->zsf = zsf;
-        p->context = context_id;
-    }
     gte.mac[1] = p->mac[0];
     gte.mac[2] = p->mac[1];
     gte.mac[3] = p->mac[2];
@@ -319,6 +370,42 @@ static void rtp(int v, int sf, int last)
         gte.mac[0] = p->mac0;
         gte.flag |= p->flag;
     }
+}
+
+static void rtp(int v, int sf, int last)
+{
+    uint32_t xy = (uint16_t)gte.vx[v] | (uint32_t)(uint16_t)gte.vy[v] << 16;
+    uint32_t zsf = (uint16_t)gte.vz[v] | (uint32_t)sf << 16;
+    uint32_t hash = xy * 0x9e3779b1u ^ zsf * 0x85ebca6bu;
+    Projected *p = &projected[hash >> 25];
+    if (p->xy != xy || p->zsf != zsf || p->context != context_id) {
+        project(gte.vx[v], gte.vy[v], gte.vz[v], sf, &p->r);
+        p->xy = xy;
+        p->zsf = zsf;
+        p->context = context_id;
+    }
+    apply(&p->r, last);
+}
+
+void gte_project(int16_t x, int16_t y, int16_t z, int sf, GteProjected *out)
+{
+    project(x, y, z, sf, out);
+}
+
+void gte_rtps_projected(const GteProjected *v)
+{
+    gte.flag = 0;
+    apply(v, 1);
+    finish_flags();
+}
+
+void gte_rtpt_projected(const GteProjected *v0, const GteProjected *v1, const GteProjected *v2)
+{
+    gte.flag = 0;
+    apply(v0, 0);
+    apply(v1, 0);
+    apply(v2, 1);
+    finish_flags();
 }
 
 void gte_op_rtps(int sf)

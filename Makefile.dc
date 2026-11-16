@@ -21,7 +21,9 @@ DD2_PROFILE ?= 1
 DD2_HW_RENDER ?= 1
 # DD2_SPU_HW=0 mixes the voices on the SH4 (the reference sound, too slow for races).
 DD2_SPU_HW ?= 1
-DEFS = -DDD2_SKIP_UNCHANGED_FRAMES $(if $(filter 1,$(DD2_HW_RENDER)),-DDD2_HW_RENDER) \
+# DD2_FAST_GTE=0 projects vertices with the PSX's exact integer arithmetic (about twice the cost).
+DD2_FAST_GTE ?= 1
+DEFS = -DDD2_SKIP_UNCHANGED_FRAMES $(if $(filter 1,$(DD2_FAST_GTE)),-DDD2_FAST_GTE) $(if $(filter 1,$(DD2_HW_RENDER)),-DDD2_HW_RENDER) \
        $(if $(filter 1,$(DD2_SPU_HW)),-DDD2_SPU_HW) $(if $(filter 1,$(DD2_PROFILE)),-DDD2_PROFILE)
 
 all: $(TARGET)

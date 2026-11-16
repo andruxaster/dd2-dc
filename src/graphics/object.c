@@ -292,6 +292,7 @@ static void draw_mesh(const Object *obj, const Mesh *mesh, int32_t prim_offset, 
     gvertices = (const SVECTOR *)mesh_section(mesh, mesh->vertices);
     gnormals = (const SVECTOR *)mesh_section(mesh, mesh->normals);
     gprim = prim_buffer[buffer_num] + prim_offset;
+    projection_changed();
     run_faces(table, mesh);
 }
 

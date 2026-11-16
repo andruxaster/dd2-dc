@@ -64,6 +64,10 @@ been checked against the real game yet. Differences in the code are marked `PORT
 
 ## Port deviations (`PORT:`)
 
+- Dreamcast (`DD2_FAST_GTE`, on by default in `Makefile.dc`): RTPS/RTPT project in single-precision floats
+  (`gte.c`). Against the exact arithmetic on 200,000 random vertices: SX or SY one off in about 2%, SZ in
+  0.06%, never more than one; the flags differed 7 times (values on a clamp edge). The desktop build stays
+  exact.
 - Dreamcast: the CD sound (music, XA) goes through a 371 ms KOS stream ring, so it plays 190-370 ms after
   the game makes it; with a smaller ring a slow frame ran it dry and the music stuttered
   (`platform_kos.c`). Sound effects play on AICA voices with no such delay.
@@ -84,6 +88,10 @@ been checked against the real game yet. Differences in the code are marked `PORT
   is skipped when the PVR is still busy, never delayed. Sound goes through a ring into a KOS sound stream.
   Memory cards stay in memory (`platform_card_path` returns false; 128 KB does not fit on a VMU). Mapping in
   `README.md`.
+- Objects project each vertex once per draw (`draw_face.c`: a table by vertex index, made when a face first
+  needs the vertex; `gte_project` and `gte_rtpt_projected` replay RTPT exactly). A new object and the sprite
+  runs (which change the rotation and translation) start the table afresh. Checked in a practice race and
+  the demo: 5 million RTPT/RTPS replays, every one leaving the GTE as the plain instruction did.
 - RTPS/RTPT keep the last results per vertex (`gte.c`, 128 entries) for the current rotation, translation,
   offsets, projection distance and depth cue: faces share vertices, and about 60% of projections in a race
   repeat one. Exact (the context is compared at every RTPS/RTPT; fuzzed against the plain version with

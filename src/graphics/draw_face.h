@@ -136,6 +136,9 @@ extern MATRIX sprite_matrix;          /* 0x800A1CD8, the roll only: model sprite
 extern MATRIX tilt_matrix;            /* 0x800A6760, roll and pitch */
 
 /* Face drawers (one per face kind, see the tables); each takes the run's record count. */
+/* The projection context (matrices, offsets) changed: projected vertices kept for faces are stale. */
+void projection_changed(void);
+
 void draw_face_3pt_flat(int count);
 void draw_face_3pt_flat_lit(int count);
 void draw_face_3pt_flat_dpq(int count);
