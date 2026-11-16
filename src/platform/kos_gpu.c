@@ -418,20 +418,35 @@ static Prim *add_prim(const HwState *s, int variant, int *mode, int u0, int v0, 
     return p;
 }
 
-static uint32_t colour(const HwState *s, int mode, int r, int g, int b)
+/* A colour channel for a modulated texture: the PSX takes 80h as 1.0, the PVR FFh. */
+static const uint8_t *doubled(void)
+{
+    static uint8_t table[256];
+    if (table[1] == 0)
+        for (int i = 0; i < 256; i++)
+            table[i] = (uint8_t)(i > 127 ? 255 : i * 2);
+    return table;
+}
+
+static uint32_t alpha_of(int mode)
 {
     static const uint32_t alpha[4] = {0x80, 0xff, 0xff, 0x40};
+    return (mode >= 0 ? alpha[mode] : 0xff) << 24;
+}
+
+static uint32_t colour(const HwState *s, int mode, int r, int g, int b)
+{
     if (s->textured) {
         if (s->raw) {
             r = g = b = 255;
         } else {
-            r = r > 127 ? 255 : r * 2;
-            g = g > 127 ? 255 : g * 2;
-            b = b > 127 ? 255 : b * 2;
+            const uint8_t *d = doubled();
+            r = d[r];
+            g = d[g];
+            b = d[b];
         }
     }
-    uint32_t a = mode >= 0 ? alpha[mode] : 0xff;
-    return a << 24 | (uint32_t)r << 16 | (uint32_t)g << 8 | (uint32_t)b;
+    return alpha_of(mode) | (uint32_t)r << 16 | (uint32_t)g << 8 | (uint32_t)b;
 }
 
 static void vertex(pvr_vertex_t *pv, float x, float y, float u, float v, uint32_t argb, float z, bool last)
@@ -477,9 +492,32 @@ static void strip_variant(const HwState *s, int variant, const HwVertex *const *
     if (!p)
         return;
     p->count = (uint8_t)count;
-    for (int i = 0; i < count; i++)
-        vertex(&p->v[i], (float)v[i]->x, (float)v[i]->y, v[i]->u, v[i]->v,
-               colour(s, mode, v[i]->r, v[i]->g, v[i]->b), z, i == count - 1);
+    /* colour() and vertex() with everything per primitive taken out of the loop: this runs for every
+     * vertex drawn. */
+    const float ox = (float)cur->x, oy = (float)cur->y, sx = cur->sx, sy = cur->sy;
+    const float mu = map_u0, mv = map_v0, su = map_su, sv = map_sv;
+    const uint32_t a = alpha_of(mode);
+    const uint8_t *d = s->textured && !s->raw ? doubled() : NULL;
+    const bool white = s->textured && s->raw;
+    for (int i = 0; i < count; i++) {
+        const HwVertex *w = v[i];
+        pvr_vertex_t *pv = &p->v[i];
+        uint32_t c;
+        if (white)
+            c = a | 0xffffffu;
+        else if (d)
+            c = a | (uint32_t)d[w->r] << 16 | (uint32_t)d[w->g] << 8 | d[w->b];
+        else
+            c = a | (uint32_t)w->r << 16 | (uint32_t)w->g << 8 | w->b;
+        pv->flags = i == count - 1 ? PVR_CMD_VERTEX_EOL : PVR_CMD_VERTEX;
+        pv->x = ((float)w->x - ox) * sx;
+        pv->y = ((float)w->y - oy) * sy;
+        pv->z = z;
+        pv->u = ((float)w->u - mu) * su;
+        pv->v = ((float)w->v - mv) * sv;
+        pv->argb = c;
+        pv->oargb = 0;
+    }
 }
 
 static void strip(const HwState *s, const HwVertex *const *v, int count)

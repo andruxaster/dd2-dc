@@ -236,32 +236,33 @@ void convert_poly_gt4_lit(int count)
  * as long as the projection context is the one the results were made in: a new object and the sprite
  * runs, which change the rotation and translation, start afresh (projection_changed). */
 #define VERTEX_TABLE 2048
-static GteProjected vertex_table[VERTEX_TABLE];
-static uint32_t vertex_made[VERTEX_TABLE]; /* projection_id when the entry was made */
+static struct {
+    GteProjected p;
+    uint32_t made; /* projection_id when the entry was made */
+} vertex_table[VERTEX_TABLE];
 static uint32_t projection_id = 1;
 
 void projection_changed(void)
 {
     if (++projection_id == 0) { /* wrapped: no entry may pass for a current one */
-        memset(vertex_made, 0, sizeof(vertex_made));
+        memset(vertex_table, 0, sizeof(vertex_table));
         projection_id = 1;
     }
 }
 
 /* Vertex i of gvertices projected; vertices past the table go through `spare`. */
-static const GteProjected *projected_vertex(int16_t i, GteProjected *spare)
+static inline const GteProjected *projected_vertex(int16_t i, GteProjected *spare)
 {
     const SVECTOR *v = &gvertices[i];
     if ((uint16_t)i >= VERTEX_TABLE) {
         gte_project(v->vx, v->vy, v->vz, 1, spare);
         return spare;
     }
-    GteProjected *p = &vertex_table[(uint16_t)i];
-    if (vertex_made[(uint16_t)i] != projection_id) {
-        gte_project(v->vx, v->vy, v->vz, 1, p);
-        vertex_made[(uint16_t)i] = projection_id;
+    if (vertex_table[(uint16_t)i].made != projection_id) {
+        gte_project(v->vx, v->vy, v->vz, 1, &vertex_table[(uint16_t)i].p);
+        vertex_table[(uint16_t)i].made = projection_id;
     }
-    return p;
+    return &vertex_table[(uint16_t)i].p;
 }
 
 /* As gte_ldv3 and gte_rtpt on vertices a, b and c of gvertices. */

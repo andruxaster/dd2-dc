@@ -426,9 +426,18 @@ void gte_op_rtpt(int sf)
     finish_flags();
 }
 
+/* Projected points are within +-400h, so the products and their sum fit 32 bits whenever every
+ * coordinate is below 4000h in size (6 * 2^28 < 2^31); only values loaded directly need the 64-bit sum. */
 void gte_op_nclip(void)
 {
     gte.flag = 0;
+    const int16_t *x = gte.sx, *y = gte.sy;
+    if ((unsigned)(x[0] + 0x4000) < 0x8000 && (unsigned)(x[1] + 0x4000) < 0x8000 &&
+        (unsigned)(x[2] + 0x4000) < 0x8000 && (unsigned)(y[0] + 0x4000) < 0x8000 &&
+        (unsigned)(y[1] + 0x4000) < 0x8000 && (unsigned)(y[2] + 0x4000) < 0x8000) {
+        gte.mac[0] = x[0] * y[1] + x[1] * y[2] + x[2] * y[0] - x[0] * y[2] - x[1] * y[0] - x[2] * y[1];
+        return; /* no overflow flags, so no error flag either */
+    }
     int64_t v = (int64_t)gte.sx[0] * gte.sy[1] + (int64_t)gte.sx[1] * gte.sy[2] + (int64_t)gte.sx[2] * gte.sy[0] -
                 (int64_t)gte.sx[0] * gte.sy[2] - (int64_t)gte.sx[1] * gte.sy[0] - (int64_t)gte.sx[2] * gte.sy[1];
     set_mac0(v);

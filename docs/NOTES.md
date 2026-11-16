@@ -71,8 +71,8 @@ been checked against the real game yet. Differences in the code are marked `PORT
   at the start (28 to 40 blocks, 16 KB each) instead of 14 streamed in as the camera passes strips, so
   scenery no longer appears just ahead. It is drawn to depth A000h instead of 8000h, with the fog moved
   out by the same quarter (1F40h to 40000); half farther (C000h) dropped the Dreamcast to 20-29 fps. Faces past 7FFFh saturate IR3, which the race clip mask now lets
-  through (as the bowls' does); the OT grows to 4800h slots (AVSZ4 reaches 3FFFh) and `link_prim` drops a
-  face deeper than the OT. The primitive buffer is twice as large. Lateral IR1/IR2 still saturate past
+  through (as the bowls' does); the OT is the bowls' 3200h slots and `link_prim` drops a face deeper than
+  it. The primitive buffer is twice as large. Lateral IR1/IR2 still saturate past
   7FFFh, so far objects at the screen's edges can still be culled.
 - Dreamcast (`DD2_FAST_GTE`, on by default in `Makefile.dc`): RTPS/RTPT project in single-precision floats
   (`gte.c`). Against the exact arithmetic on 200,000 random vertices: SX or SY one off in about 2%, SZ in

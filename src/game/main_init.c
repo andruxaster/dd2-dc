@@ -177,9 +177,10 @@ void Init_Game(void)
     if (current_level < FIRST_BOWL_LEVEL) {
 #ifdef DD2_FULL_SCENERY
         /* PORT: scenery is drawn out to RACE_FAR_Z. IR3 (the depth) saturates beyond 7FFFh, so as in the
-         * bowls a face with IR3 saturated is kept. Its OT slot can then reach AVSZ4's largest, 3FFFh
-         * (SZ saturated at FFFFh), plus the mesh's ot_bias. */
-        Allocate_OT(0x4800);
+         * bowls a face with IR3 saturated is kept, with the bowls' OT: up to depth C000h or so with the
+         * meshes' ot_bias, deeper faces are dropped (link_prim). A longer OT costs every frame its
+         * clearing and walking. */
+        Allocate_OT(0x3200);
         clip_flag_mask = GTE_CLIP_FLAGS & ~GTE_FLAG_IR3;
 #else
         Allocate_OT(0x2200);
