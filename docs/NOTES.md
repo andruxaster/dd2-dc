@@ -87,6 +87,13 @@ been checked against the real game yet. Differences in the code are marked `PORT
   software. Semi-transparent textured primitives are drawn twice (STP-clear texels solid, STP-set ones
   blended), as the PSX decides per texel. `PORT:` approximations are listed at the top of `kos_gpu.c` (mode 2 as B*(1-F), modulation capped at 2x, no dither/mask/clip, screen read-backs see no primitives).
   The pause menu's copy of the frozen picture is followed at the record level.
+- Dreamcast AICA voices (`DD2_SPU_HW`, `psx/spu_hw.h`, `platform/kos_spu.c`): libspu still runs every voice's
+  state exactly (envelope, position, loop flags, ENDX; `voice_advance` jumps between envelope steps and
+  block ends, checked equal to `voice_sample` stepping on 240,000 random stretches) but makes no sound;
+  each voice plays on an AICA channel from its sample decoded once to 16-bit PCM (samples over 65535 are
+  averaged down 2x or 4x and played slower), pitch, volume and pan updated per vblank. Only the CD audio
+  goes through the stream. `PORT:` notes in libspu.c (vblank-rate volume, hardware interpolation, loop
+  history).
 - `gpu.c` triangles step the edge functions and attribute numerators per pixel and divide by the area with an
   exact reciprocal multiply: same pixels as the per-pixel divisions (checked on 200,000 random polygons and
   every area at the boundary numerators), but no division per pixel, which the SH4 does in software.

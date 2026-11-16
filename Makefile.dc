@@ -19,7 +19,10 @@ OPT ?= -O2
 DD2_PROFILE ?= 1
 # DD2_HW_RENDER=0 draws everything in software (the reference look, very slow).
 DD2_HW_RENDER ?= 1
-DEFS = -DDD2_SKIP_UNCHANGED_FRAMES $(if $(filter 1,$(DD2_HW_RENDER)),-DDD2_HW_RENDER) $(if $(filter 1,$(DD2_PROFILE)),-DDD2_PROFILE)
+# DD2_SPU_HW=0 mixes the voices on the SH4 (the reference sound, too slow for races).
+DD2_SPU_HW ?= 1
+DEFS = -DDD2_SKIP_UNCHANGED_FRAMES $(if $(filter 1,$(DD2_HW_RENDER)),-DDD2_HW_RENDER) \
+       $(if $(filter 1,$(DD2_SPU_HW)),-DDD2_SPU_HW) $(if $(filter 1,$(DD2_PROFILE)),-DDD2_PROFILE)
 
 all: $(TARGET)
 
@@ -33,7 +36,7 @@ $(BUILD)/%.o: %.c Makefile.dc
 
 # Only the platform layer includes KOS headers, which need the GNU dialect (and would clash with the
 # Psy-Q u_int/u_long types in game code).
-$(BUILD)/src/platform/platform_kos.o $(BUILD)/src/platform/kos_gpu.o: CSTD = -std=gnu11
+$(BUILD)/src/platform/platform_kos.o $(BUILD)/src/platform/kos_gpu.o $(BUILD)/src/platform/kos_spu.o: CSTD = -std=gnu11
 
 $(TARGET): $(OBJS)
 	kos-cc -o $@ $(OBJS) -lm

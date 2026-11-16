@@ -3,6 +3,9 @@
 #include "platform/platform.h"
 #include "psx/libcd.h"
 #include "psx/profile.h"
+#ifdef DD2_SPU_HW
+#include "psx/spu_hw.h"
+#endif
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -48,6 +51,7 @@ typedef struct {
     int phase;           /* ENV_* */
     int32_t level;       /* ADSR volume, 0..7FFFh */
     uint32_t env_counter;
+    bool keyed;          /* keyed on since the last spu_service (DD2_SPU_HW) */
 } Voice;
 
 extern const int16_t spu_gauss[512];
@@ -59,6 +63,9 @@ static SpuCommonAttr common;
 static Voice voices[VOICES];
 static uint32_t endx;
 static int64_t vblanks_mixed;
+#ifdef DD2_SPU_HW
+static void hw_forget(uint32_t first, uint32_t end);
+#endif
 
 const u_char *spu_ram(void)
 {
@@ -138,6 +145,9 @@ u_long SpuWrite(u_char *addr, u_long size)
     if (size > SPU_RAM_SIZE - transfer_addr)
         size = SPU_RAM_SIZE - transfer_addr;
     memcpy(ram + transfer_addr, addr, size);
+#ifdef DD2_SPU_HW
+    hw_forget((uint32_t)transfer_addr, (uint32_t)(transfer_addr + size));
+#endif
     return size;
 }
 
@@ -198,6 +208,7 @@ void SpuSetKey(long on_off, u_long voice_bit)
             v->phase = ENV_ATTACK;
             v->level = 0;
             v->env_counter = 0;
+            v->keyed = true;
             endx &= ~(1u << i);
         } else if (v->phase != ENV_OFF) {
             v->phase = ENV_RELEASE;
@@ -241,28 +252,39 @@ static void decode_block(Voice *v)
     v->decoded = true;
 }
 
-/* One envelope step from psx-spx "Envelope Operation depending on Shift/Step/Mode/Direction". */
-static void envelope_tick(Voice *v, bool exponential, bool decrease, int shift, int step)
+/* One envelope step from psx-spx "Envelope Operation depending on Shift/Step/Mode/Direction":
+ * the counter rises by `increment` each tick and the level moves by `step` when its bit 15 sets. */
+static void envelope_rate(const Voice *v, bool exponential, bool decrease, int shift, int step_bits,
+                          int32_t *step, uint32_t *increment)
 {
-    int32_t adsr_step = 7 - step;
+    int32_t adsr_step = 7 - step_bits;
     if (decrease)
         adsr_step = ~adsr_step;
     adsr_step *= 1 << (shift < 11 ? 11 - shift : 0);
-    uint32_t increment = 0x8000u >> (shift > 11 ? shift - 11 : 0);
+    uint32_t inc = 0x8000u >> (shift > 11 ? shift - 11 : 0);
     if (exponential && !decrease && v->level > 0x6000) {
         if (shift < 10) {
             adsr_step /= 4;
         } else if (shift >= 11) {
-            increment /= 4;
+            inc /= 4;
         } else {
             adsr_step /= 2;
-            increment /= 2;
+            inc /= 2;
         }
     } else if (exponential && decrease) {
         adsr_step = adsr_step * v->level / 0x8000;
     }
-    if ((step | shift << 2) != 0x7f && increment == 0)
-        increment = 1;
+    if ((step_bits | shift << 2) != 0x7f && inc == 0)
+        inc = 1;
+    *step = adsr_step;
+    *increment = inc;
+}
+
+static void envelope_tick(Voice *v, bool exponential, bool decrease, int shift, int step_bits)
+{
+    int32_t adsr_step;
+    uint32_t increment;
+    envelope_rate(v, exponential, decrease, shift, step_bits, &adsr_step, &increment);
     v->env_counter += increment;
     if (!(v->env_counter & 0x8000))
         return;
@@ -274,28 +296,50 @@ static void envelope_tick(Voice *v, bool exponential, bool decrease, int shift, 
         v->level = 0;
 }
 
-static void envelope(Voice *v)
+/* The envelope settings of the voice's phase (false when it has none: off). */
+static bool envelope_params(const Voice *v, bool *exponential, bool *decrease, int *shift, int *step_bits)
 {
     switch (v->phase) {
     case ENV_ATTACK:
-        envelope_tick(v, v->adsr1 >> 15, false, (v->adsr1 >> 10) & 0x1f, (v->adsr1 >> 8) & 3);
+        *exponential = v->adsr1 >> 15, *decrease = false, *shift = (v->adsr1 >> 10) & 0x1f;
+        *step_bits = (v->adsr1 >> 8) & 3;
+        return true;
+    case ENV_DECAY:
+        *exponential = true, *decrease = true, *shift = (v->adsr1 >> 4) & 0xf, *step_bits = 0;
+        return true;
+    case ENV_SUSTAIN:
+        *exponential = v->adsr2 >> 15, *decrease = (v->adsr2 >> 14) & 1, *shift = (v->adsr2 >> 8) & 0x1f;
+        *step_bits = (v->adsr2 >> 6) & 3;
+        return true;
+    case ENV_RELEASE:
+        *exponential = (v->adsr2 >> 5) & 1, *decrease = true, *shift = v->adsr2 & 0x1f, *step_bits = 0;
+        return true;
+    default:
+        return false;
+    }
+}
+
+static void envelope(Voice *v)
+{
+    bool exponential, decrease;
+    int shift, step_bits;
+    if (!envelope_params(v, &exponential, &decrease, &shift, &step_bits))
+        return;
+    envelope_tick(v, exponential, decrease, shift, step_bits);
+    switch (v->phase) {
+    case ENV_ATTACK:
         if (v->level >= 0x7fff) {
             v->phase = ENV_DECAY;
             v->env_counter = 0;
         }
         break;
     case ENV_DECAY:
-        envelope_tick(v, true, true, (v->adsr1 >> 4) & 0xf, 0);
         if (v->level <= ((v->adsr1 & 0xf) + 1) * 0x800) {
             v->phase = ENV_SUSTAIN;
             v->env_counter = 0;
         }
         break;
-    case ENV_SUSTAIN:
-        envelope_tick(v, v->adsr2 >> 15, (v->adsr2 >> 14) & 1, (v->adsr2 >> 8) & 0x1f, (v->adsr2 >> 6) & 3);
-        break;
     case ENV_RELEASE:
-        envelope_tick(v, (v->adsr2 >> 5) & 1, true, v->adsr2 & 0x1f, 0);
         if (v->level == 0)
             v->phase = ENV_OFF;
         break;
@@ -336,6 +380,89 @@ static void voice_sample(int index, int32_t *left, int32_t *right)
     }
 }
 
+#ifdef DD2_SPU_HW
+/* Ticks the envelope up to n times, as n calls of envelope() would; returns how many ran (fewer when the
+ * voice went off). Ticks that only raise the counter are taken together: between the level changes the
+ * rate stays the same and so does every phase check. */
+static int envelope_advance(Voice *v, int n)
+{
+    int done = 0;
+    while (done < n) {
+        int phase = v->phase;
+        int32_t level = v->level;
+        envelope(v);
+        done++;
+        if (v->phase == ENV_OFF)
+            return done;
+        if (v->phase != phase || v->level != level || v->env_counter == 0)
+            continue; /* a step or a new phase: the next tick is worked out afresh */
+        bool exponential, decrease;
+        int shift, step_bits;
+        int32_t step;
+        uint32_t increment;
+        if (!envelope_params(v, &exponential, &decrease, &shift, &step_bits))
+            return done;
+        envelope_rate(v, exponential, decrease, shift, step_bits, &step, &increment);
+        if (increment == 0) {
+            done = n; /* never steps */
+            break;
+        }
+        /* Ticks before the one whose increment sets bit 15. */
+        uint32_t quiet = (0x8000u - v->env_counter + increment - 1) / increment - 1;
+        if (quiet > (uint32_t)(n - done))
+            quiet = (uint32_t)(n - done);
+        v->env_counter += quiet * increment;
+        done += (int)quiet;
+    }
+    return done;
+}
+
+/* The block the voice enters: its flags (a Loop Start flag makes it the repeat address), as decode_block
+ * sets them, without decoding. */
+static void enter_block(Voice *v)
+{
+    const u_char *block = &ram[(v->address * 8) & (SPU_RAM_SIZE - 1)];
+    v->flags = block[1];
+    if (v->flags & FLAG_LOOP_START)
+        v->repeat = (uint16_t)v->address;
+    v->decoded = true;
+}
+
+/* n samples of a voice's state as voice_sample moves it (envelope, position, loop flags, ENDX), without
+ * making its sound, by whole stretches between block ends. */
+static void voice_advance(int index, int n)
+{
+    Voice *v = &voices[index];
+    while (n > 0 && v->phase != ENV_OFF) {
+        if (!v->decoded)
+            enter_block(v);
+        uint32_t pitch = v->pitch > 0x3fff ? 0x4000 : v->pitch;
+        /* Samples up to and including the one whose step leaves the block. */
+        uint32_t to_end = pitch ? ((BLOCK_SAMPLES << 12) - v->counter + pitch - 1) / pitch : 0xffffffffu;
+        int run = to_end < (uint32_t)n ? (int)to_end : n;
+        int ticked = envelope_advance(v, run);
+        v->counter += (uint32_t)ticked * pitch;
+        n -= ticked;
+        if ((v->counter >> 12) >= BLOCK_SAMPLES) {
+            v->counter -= BLOCK_SAMPLES << 12;
+            if (v->flags & FLAG_LOOP_END) {
+                endx |= 1u << index;
+                v->address = v->repeat;
+                if (!(v->flags & FLAG_LOOP_REPEAT)) {
+                    v->phase = ENV_RELEASE;
+                    v->level = 0;
+                }
+            } else {
+                v->address += BLOCK_BYTES / 8;
+            }
+            v->decoded = false;
+        }
+        if (ticked < run)
+            break; /* went off */
+    }
+}
+#endif
+
 void SpuGetVoiceEnvelope(int voice, short *envx)
 {
     *envx = (short)voices[voice].level;
@@ -357,6 +484,269 @@ void spu_mix(short *stereo, int frames)
     }
 }
 
+
+#ifdef DD2_SPU_HW
+/* ---- hardware voices (spu_hw.h) ----
+ *
+ * A sample is what a voice plays from its start address to the block with Loop End, decoded as
+ * decode_block does; it loops (Loop Repeat in that block) from the last Loop Start block on the way, or
+ * the repeat address the voice had. Longer than a hardware channel takes (65535 samples), every 2 (or 4)
+ * are averaged into one and it plays at half (a quarter) the rate.
+ *
+ * PORT: the sound follows the emulated voices at the vblank: volume (envelope included), pitch and pan
+ * change 60 times a second instead of every sample; interpolation is the hardware's, not the Gaussian;
+ * a loop restarts the ADPCM filter's history from the decoded sample, not from the loop's own past. */
+
+#define HW_SAMPLES 64
+#define HW_MAX_LENGTH 65535
+#define HW_MAX_BLOCKS (SPU_RAM_SIZE / BLOCK_BYTES)
+
+typedef struct {
+    bool used;
+    uint32_t start, end;  /* the ADPCM in SPU RAM, bytes */
+    int loop_block;       /* the block it loops back to, -1 for none */
+    int handle, length, loop_start, shift;
+    unsigned last_use;
+} HwSample;
+
+static HwSample hw_samples[HW_SAMPLES];
+static struct {
+    int sample; /* hw_samples index while playing, -1 when not */
+    int freq, vol, pan;
+} hw_voices[VOICES];
+static unsigned hw_clock;
+static int16_t hw_pcm[HW_MAX_LENGTH];
+
+static void hw_init_voices(void)
+{
+    static bool done;
+    if (done)
+        return;
+    done = true;
+    for (int i = 0; i < VOICES; i++)
+        hw_voices[i].sample = -1;
+}
+
+/* Stops what plays a sample and frees it. */
+static void hw_drop(int index)
+{
+    for (int i = 0; i < VOICES; i++)
+        if (hw_voices[i].sample == index) {
+            spu_hw_stop(i);
+            hw_voices[i].sample = -1;
+        }
+    spu_hw_free(hw_samples[index].handle);
+    hw_samples[index].used = false;
+}
+
+/* SPU RAM first..end-1 was written: the samples from it are decoded again when next played. */
+static void hw_forget(uint32_t first, uint32_t end)
+{
+    for (int i = 0; i < HW_SAMPLES; i++)
+        if (hw_samples[i].used && hw_samples[i].start < end && first < hw_samples[i].end)
+            hw_drop(i);
+}
+
+/* Frees the least recently started sample no voice plays; false when there is none. */
+static bool hw_evict(void)
+{
+    int pick = -1;
+    for (int i = 0; i < HW_SAMPLES; i++) {
+        if (!hw_samples[i].used)
+            continue;
+        bool playing = false;
+        for (int v = 0; v < VOICES && !playing; v++)
+            playing = hw_voices[v].sample == i;
+        if (!playing && (pick < 0 || hw_samples[i].last_use < hw_samples[pick].last_use))
+            pick = i;
+    }
+    if (pick < 0)
+        return false;
+    hw_drop(pick);
+    return true;
+}
+
+/* The sample voice v plays from its start address, decoded and uploaded if needed; -1 if it can't be. */
+static int hw_sample_for(const Voice *v)
+{
+    uint32_t start = (uint32_t)v->start * 8;
+    /* Where it ends and loops: the walk the voice would make. */
+    int blocks = 0, loop_block = -1;
+    uint32_t repeat = (uint32_t)v->repeat * 8;
+    bool loops = false;
+    for (uint32_t a = start;; a = (a + BLOCK_BYTES) & (SPU_RAM_SIZE - 1)) {
+        uint8_t flags = ram[a + 1];
+        if (flags & FLAG_LOOP_START)
+            repeat = a;
+        blocks++;
+        if (flags & FLAG_LOOP_END) {
+            loops = (flags & FLAG_LOOP_REPEAT) != 0;
+            break;
+        }
+        if (blocks >= HW_MAX_BLOCKS)
+            break;
+    }
+    uint32_t end = start + (uint32_t)blocks * BLOCK_BYTES;
+    if (loops)
+        loop_block = repeat >= start && repeat < end ? (int)((repeat - start) / BLOCK_BYTES) : 0;
+    for (int i = 0; i < HW_SAMPLES; i++)
+        if (hw_samples[i].used && hw_samples[i].start == start && hw_samples[i].loop_block == loop_block) {
+            hw_samples[i].last_use = hw_clock;
+            return i;
+        }
+
+    int shift = 0;
+    while (((long)blocks * BLOCK_SAMPLES >> shift) > HW_MAX_LENGTH)
+        shift++;
+    int per = 1 << shift, length = 0, sum = 0, summed = 0;
+    Voice d;
+    memset(&d, 0, sizeof(d));
+    for (int b = 0; b < blocks; b++) {
+        d.address = (start / 8 + (uint32_t)b * 2) & (SPU_RAM_SIZE / 8 - 1);
+        decode_block(&d);
+        for (int k = 0; k < BLOCK_SAMPLES; k++) {
+            sum += d.samples[3 + k];
+            if (++summed == per) {
+                if (length < HW_MAX_LENGTH)
+                    hw_pcm[length++] = (int16_t)(sum / per);
+                sum = summed = 0;
+            }
+        }
+    }
+    if (length == 0)
+        return -1;
+    int handle;
+    while ((handle = spu_hw_upload(hw_pcm, length)) < 0)
+        if (!hw_evict())
+            return -1;
+    int pick = -1;
+    for (int i = 0; i < HW_SAMPLES && pick < 0; i++)
+        if (!hw_samples[i].used)
+            pick = i;
+    if (pick < 0) {
+        if (!hw_evict()) {
+            spu_hw_free(handle);
+            return -1;
+        }
+        for (int i = 0; i < HW_SAMPLES && pick < 0; i++)
+            if (!hw_samples[i].used)
+                pick = i;
+    }
+    HwSample *h = &hw_samples[pick];
+    h->used = true;
+    h->start = start;
+    h->end = end;
+    h->loop_block = loop_block;
+    h->handle = handle;
+    h->length = length;
+    h->loop_start = loop_block < 0 ? -1 : loop_block * BLOCK_SAMPLES >> shift;
+    h->shift = shift;
+    h->last_use = hw_clock;
+    return pick;
+}
+
+/* A voice's output gain on one side, 0..7FFFh: envelope, voice volume (direct mode, either sign) and
+ * the main volume, as spu_mix applies them. */
+static int32_t hw_gain(const Voice *v, int side)
+{
+    int32_t vol = (int16_t)(v->volume[side] << 1);
+    if (vol < 0)
+        vol = -vol;
+    int32_t main = side ? common.mvol.right : common.mvol.left;
+    if (main < 0)
+        main = -main;
+    int32_t g = (v->level * vol >> 15) * main >> 14;
+    return g > 0x7fff ? 0x7fff : g;
+}
+
+/* Gains to the hardware's volume (linear 0-255) and pan (3 dB steps away from the centre). */
+static void hw_volume_pan(int32_t left, int32_t right, int *vol, int *pan)
+{
+    int32_t loud = left > right ? left : right, quiet = left > right ? right : left;
+    *vol = (int)((loud * 255 + 0x4000) / 0x7fff);
+    int steps = 0;
+    if (quiet <= 0) {
+        steps = loud > 0 ? 15 : 0;
+    } else {
+        /* 3 dB = 2^(1/2): count how many halvings of the power separate the sides. */
+        int64_t q = (int64_t)quiet * quiet, l = (int64_t)loud * loud;
+        while (steps < 15 && q * 2 <= l) {
+            q *= 2;
+            steps++;
+        }
+        if (steps < 15 && q * 2 - l < l - q) /* nearer the next step */
+            steps++;
+    }
+    if (steps == 0)
+        *pan = 128;
+    else if (left > right)
+        *pan = 0x7f - steps * 8;
+    else
+        *pan = 0x80 + steps * 8;
+}
+
+/* A vblank of the voices: their exact state, then what the hardware channels play. */
+static void hw_service(int frames)
+{
+    hw_init_voices();
+    hw_clock++;
+    for (int i = 0; i < VOICES; i++) {
+        Voice *v = &voices[i];
+        bool keyed = v->keyed;
+        v->keyed = false;
+        voice_advance(i, frames);
+        if (v->phase == ENV_OFF) {
+            if (hw_voices[i].sample >= 0) {
+                spu_hw_stop(i);
+                hw_voices[i].sample = -1;
+            }
+            continue;
+        }
+        int vol, pan;
+        hw_volume_pan(hw_gain(v, 0), hw_gain(v, 1), &vol, &pan);
+        int index = hw_voices[i].sample;
+        uint32_t pitch = v->pitch > 0x3fff ? 0x4000 : v->pitch;
+        if (pitch == 0)
+            vol = 0; /* a stopped voice; the hardware has no rate 0 */
+        int shift = index >= 0 ? hw_samples[index].shift : 0;
+        if (keyed) {
+            index = hw_sample_for(v);
+            hw_voices[i].sample = index;
+            if (index < 0) {
+                spu_hw_stop(i);
+                continue;
+            }
+            const HwSample *h = &hw_samples[index];
+            int freq = (int)((SPU_RATE * pitch / 4096) >> h->shift);
+            spu_hw_play(i, h->handle, h->length, h->loop_start, freq, vol, pan);
+            hw_voices[i].freq = freq;
+            hw_voices[i].vol = vol;
+            hw_voices[i].pan = pan;
+        } else if (index >= 0) {
+            int freq = (int)((SPU_RATE * pitch / 4096) >> shift);
+            if (freq != hw_voices[i].freq || vol != hw_voices[i].vol || pan != hw_voices[i].pan) {
+                spu_hw_update(i, freq, vol, pan);
+                hw_voices[i].freq = freq;
+                hw_voices[i].vol = vol;
+                hw_voices[i].pan = pan;
+            }
+        }
+    }
+}
+
+/* The CD input alone, at the CD and main volumes. */
+static void hw_cd_mix(short *stereo, int frames)
+{
+    cd_audio_read(stereo, frames);
+    for (int i = 0; i < frames; i++) {
+        int32_t l = stereo[i * 2] * common.cd.volume.left >> 15;
+        int32_t r = stereo[i * 2 + 1] * common.cd.volume.right >> 15;
+        stereo[i * 2] = clamp16(l * common.mvol.left >> 14);
+        stereo[i * 2 + 1] = clamp16(r * common.mvol.right >> 14);
+    }
+}
+#endif
+
 /* 44100 Hz against the 59.94 Hz vblank: 735 or 736 frames per vblank. */
 void spu_service(void)
 {
@@ -365,7 +755,12 @@ void spu_service(void)
     int frames = (int)(vblanks_mixed * SPU_RATE * 1001 / 60000 - start);
     short out[MAX_VBLANK_FRAMES * 2];
     PROFILE_START();
+#ifdef DD2_SPU_HW
+    hw_service(frames);
+    hw_cd_mix(out, frames);
+#else
     spu_mix(out, frames);
+#endif
     PROFILE_END(PROFILE_SPU);
     platform_audio_push(out, frames);
 }
