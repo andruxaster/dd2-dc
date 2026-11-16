@@ -36,7 +36,8 @@ $(BUILD)/%.o: %.c Makefile.dc
 
 # Only the platform layer includes KOS headers, which need the GNU dialect (and would clash with the
 # Psy-Q u_int/u_long types in game code).
-$(BUILD)/src/platform/platform_kos.o $(BUILD)/src/platform/kos_gpu.o $(BUILD)/src/platform/kos_spu.o: CSTD = -std=gnu11
+$(BUILD)/src/platform/platform_kos.o $(BUILD)/src/platform/kos_gpu.o $(BUILD)/src/platform/kos_spu.o \
+    $(BUILD)/src/platform/kos_pcprof.o: CSTD = -std=gnu11
 
 $(TARGET): $(OBJS)
 	kos-cc -o $@ $(OBJS) -lm

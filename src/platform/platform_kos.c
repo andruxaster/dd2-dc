@@ -158,6 +158,8 @@ static void convert_row_15(uint16_t *dst, const uint16_t *src, int w)
 #ifdef DD2_HW_RENDER
 void kos_gpu_stats(int *converted, int *failed);
 #endif
+void kos_pcprof_start(void);
+void kos_pcprof_poll(void);
 #define PROFILE_PERIOD_NS 2000000000ull
 
 static uint64_t profile_ns[PROFILE_PARTS], profile_since;
@@ -173,8 +175,11 @@ void platform_profile_add(int part, uint64_t ns)
 void platform_profile_frame(void)
 {
     uint64_t now = timer_ns_gettime64();
-    if (profile_since == 0)
+    if (profile_since == 0) {
         profile_since = now;
+        kos_pcprof_start();
+    }
+    kos_pcprof_poll();
     profile_frames++;
     uint64_t elapsed = now - profile_since;
     if (elapsed < PROFILE_PERIOD_NS)
