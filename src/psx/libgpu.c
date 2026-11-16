@@ -80,13 +80,21 @@ int LoadImage(RECT *rect, u_long *p)
 {
     PROFILE_START();
     const u_short *src = (const u_short *)p;
+    bool changed = false;
     for (int y = 0; y < rect->h; y++) {
         u_short *row = vram[(rect->y + y) & (VRAM_HEIGHT - 1)];
-        for (int x = 0; x < rect->w; x++)
-            row[(rect->x + x) & (VRAM_WIDTH - 1)] = *src++;
+        for (int x = 0; x < rect->w; x++) {
+            u_short *at = &row[(rect->x + x) & (VRAM_WIDTH - 1)];
+            changed |= *at != *src;
+            *at = *src++;
+        }
     }
-    vram_generation++;
-    HW(gpu_hw_vram_written(rect->x, rect->y, rect->w, rect->h, true));
+    /* The game rewrites car CLUTs every frame, mostly with what is there already: only a real change
+     * costs the renderer its textures. */
+    if (changed) {
+        vram_generation++;
+        HW(gpu_hw_vram_written(rect->x, rect->y, rect->w, rect->h, true));
+    }
     PROFILE_END(PROFILE_GPU);
     return 0;
 }
