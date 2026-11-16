@@ -44,36 +44,40 @@ static const struct {
 
 /* ---- sound ---- */
 
-/* About 8 vblanks of sound; more than that queued means the game ran ahead, so it is dropped. */
-#define AUDIO_RING_FRAMES 8192
-#define AUDIO_MAX_QUEUED (8 * 736)
-#define STREAM_BUFFER 8192
+/* PORT: the CD sound plays 190-370 ms after the game makes it. The AICA ring is the only buffer between
+ * the game and the speaker, and the game feeds it only when it services a vblank (VSync waits and
+ * polls). A slow frame (50 ms at 20 fps, more when textures are made) must not run it dry, so it
+ * holds 371 ms; KOS refills it once half is free. The callback hands over only what the game has made: a
+ * shortfall leaves the write position where it is instead of putting a gap of silence in the music. */
+#define STREAM_BUFFER 32768 /* bytes per channel: 16384 samples */
+#define AUDIO_RING_FRAMES 32768
+#define AUDIO_MAX_QUEUED 16384 /* stereo frames; more means nothing is playing, so the rest is dropped */
+#define STREAM_ALIGN 64        /* frames per fill step: keeps the AICA writes 32-byte aligned */
 
 static snd_stream_hnd_t stream = SND_STREAM_INVALID;
 static int16_t ring[AUDIO_RING_FRAMES * 2];
 static unsigned ring_read, ring_write; /* in stereo frames, wrapping */
-static int16_t stream_out[STREAM_BUFFER / 2] __attribute__((aligned(32)));
+static int16_t stream_out[STREAM_BUFFER / 2] /* one fill: half the ring, both channels */ __attribute__((aligned(32)));
 
-/* Called from snd_stream_poll on the main thread, so the ring needs no lock. `bytes` is what the
- * stream wants; any shortfall is silence. */
+/* Called from snd_stream_poll on the main thread, so the ring needs no lock. `bytes` is the most the
+ * stream takes. */
 static void *stream_callback(snd_stream_hnd_t hnd, int bytes, int *got)
 {
     (void)hnd;
-    int frames = bytes / 4;
-    if (frames > (int)(sizeof(stream_out) / 4))
-        frames = (int)(sizeof(stream_out) / 4);
+    unsigned frames = (unsigned)bytes / 4;
+    if (frames > sizeof(stream_out) / 4)
+        frames = sizeof(stream_out) / 4;
     unsigned queued = ring_write - ring_read;
-    for (int i = 0; i < frames; i++) {
-        if ((unsigned)i < queued) {
-            unsigned at = (ring_read + (unsigned)i) % AUDIO_RING_FRAMES;
-            stream_out[i * 2] = ring[at * 2];
-            stream_out[i * 2 + 1] = ring[at * 2 + 1];
-        } else {
-            stream_out[i * 2] = stream_out[i * 2 + 1] = 0;
-        }
+    if (frames > queued)
+        frames = queued;
+    frames &= ~(unsigned)(STREAM_ALIGN - 1);
+    for (unsigned i = 0; i < frames; i++) {
+        unsigned at = (ring_read + i) % AUDIO_RING_FRAMES;
+        stream_out[i * 2] = ring[at * 2];
+        stream_out[i * 2 + 1] = ring[at * 2 + 1];
     }
-    ring_read += (unsigned)frames < queued ? (unsigned)frames : queued;
-    *got = frames * 4;
+    ring_read += frames;
+    *got = (int)frames * 4;
     return stream_out;
 }
 

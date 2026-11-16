@@ -64,6 +64,9 @@ been checked against the real game yet. Differences in the code are marked `PORT
 
 ## Port deviations (`PORT:`)
 
+- Dreamcast: the CD sound (music, XA) goes through a 371 ms KOS stream ring, so it plays 190-370 ms after
+  the game makes it; with a smaller ring a slow frame ran it dry and the music stuttered
+  (`platform_kos.c`). Sound effects play on AICA voices with no such delay.
 - `Print_Bank_Fade` with transparency mode 2 reads uninitialised registers in the original; the port does not
   fade.
 - `Place_Cars_On_Grid` seeds the fd position.
