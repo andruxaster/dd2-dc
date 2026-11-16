@@ -64,6 +64,9 @@ const int16_t light_colours[12][4] = { /* by level - 1 */
     {4096, 4096, 4096, 0}, {4096, 4096, 4096, 0}, {4096, 4096, 4096, 0}, {2, 0, 1, 0},
 };
 
+#define FOG_NEAR 0x1900
+#define FOG_FAR 32000
+
 MATRIX scene_colour_matrix = {{{4096, 0, 0}, {0, 4096, 0}, {0, 0, 4096}}, {0, 0, 0}}; /* 0x8006F7A4 */
 MATRIX scene_light_matrix = {{{0x830, 0x830, 0}, {0, 0, 0}, {0, 0, 0}}, {0, 0, 0}};     /* 0x8006F7C4 */
 static const MATRIX sky_matrix = {{{4096, 0, 0}, {0, 4096, 0}, {0, 0, 4096}}, {0, 0, 0}};      /* 0x80010618 */

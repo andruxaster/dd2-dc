@@ -175,17 +175,8 @@ void Init_Game(void)
     reset_sound_channels();
     Init_Primitive_Buffer(0x40000);
     if (current_level < FIRST_BOWL_LEVEL) {
-#ifdef DD2_FULL_SCENERY
-        /* PORT: scenery is drawn out to RACE_FAR_Z. IR3 (the depth) saturates beyond 7FFFh, so as in the
-         * bowls a face with IR3 saturated is kept, with the bowls' OT: up to depth C000h or so with the
-         * meshes' ot_bias, deeper faces are dropped (link_prim). A longer OT costs every frame its
-         * clearing and walking. */
-        Allocate_OT(0x3200);
-        clip_flag_mask = GTE_CLIP_FLAGS & ~GTE_FLAG_IR3;
-#else
         Allocate_OT(0x2200);
         clip_flag_mask = GTE_CLIP_FLAGS;
-#endif
     } else {
         Allocate_OT(0x3200);
         clip_flag_mask = GTE_CLIP_FLAGS & ~GTE_FLAG_IR3; /* the bowls keep faces with IR3 saturated */
@@ -193,7 +184,7 @@ void Init_Game(void)
     set_screen_centre(screen_width / 2, screen_height / 2);
     set_projection_distance(0xa0);
     SetDispMask(1);
-    Set_Zclip(0, RACE_FAR_Z);
+    Set_Zclip(0, 0x8000);
     Set_Load_Textures();
     Queue_Level_Data();
     CD_Stop();

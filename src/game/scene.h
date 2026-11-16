@@ -9,17 +9,10 @@
 
 #ifdef DD2_FULL_SCENERY
 /* PORT: every block of a track stays resident (a track has 28 to 40), so scenery no longer appears
- * just ahead of the camera as the PSX streamed it in. */
+ * just ahead of the camera as the PSX streamed it in. It is drawn as far as on the PSX: a quarter
+ * farther cost the Dreamcast its steady 30 fps. */
 #define SCENE_BLOCKS 64
-/* PORT: and drawn a quarter farther than the PSX's 8000h, with the fog moved out to match (half
- * farther cost the Dreamcast its steady 30 fps). */
-#define RACE_FAR_Z 0xa000
-#define FOG_NEAR 0x1f40
-#define FOG_FAR 40000
 #else
-#define RACE_FAR_Z 0x8000
-#define FOG_NEAR 0x1900
-#define FOG_FAR 32000
 #define SCENE_BLOCKS 14       /* blocks resident at once */
 #endif
 #define SCENE_BLOCK_SIZE 0x4000
