@@ -1,5 +1,5 @@
 /* A sampling profiler for the Dreamcast build (DD2_PROFILE): timer channel 1 notes where the CPU was 1000
- * times a second; every 20 seconds the busiest 256-byte stretches of code go to the console as
+ * times a second; every 20 seconds the busiest 64-byte stretches of code go to the console as
  * "pcprof <address> <per mille>", to be matched with functions in dd2.elf (sh-elf-nm -n dd2.elf).
  * KallistiOS only needs channel 1 for nothing but its default handler; the watchdog timer it suggests
  * instead does not interrupt in emulators such as Flycast. */
@@ -9,9 +9,9 @@
 #include <string.h>
 
 #define CODE_START 0x8c010000u
-#define BUCKET_SHIFT 8
-#define BUCKETS 8192 /* 2 MB of code */
-#define SHOWN 40
+#define BUCKET_SHIFT 6
+#define BUCKETS 32768 /* 2 MB of code */
+#define SHOWN 60
 #define PERIOD_SAMPLES 20000
 
 static volatile uint32_t counts[BUCKETS];

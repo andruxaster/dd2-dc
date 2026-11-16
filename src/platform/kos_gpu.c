@@ -40,12 +40,18 @@ uint16_t *gpu_vram(void);
 #define BACKDROP 512
 #define Z_STEP (1.0f / 4096.0f)
 
+/* The header and vertices are contiguous, so a primitive goes to the PVR in one store-queue copy; 192
+ * bytes keeps every primitive 32-byte aligned. */
 typedef struct {
     pvr_poly_hdr_t hdr;
     pvr_vertex_t v[4];
+    uint32_t hdr_id; /* which compiled header hdr is: equal ids are equal headers */
     uint8_t list, count;
     int16_t tex;
+    uint8_t pad[24];
 } Prim;
+
+_Static_assert(sizeof(Prim) == 192, "Prim");
 
 typedef struct {
     bool used, shown, single, pending;
@@ -329,21 +335,25 @@ void kos_gpu_stats(int *converted, int *failed)
  * few dozen, and compiling one each time cost more than drawing its polygon. */
 #define HEADER_CACHE 64
 
-static pvr_poly_hdr_t header(pvr_list_t list, int tex, int mode)
+static uint32_t header(pvr_list_t list, int tex, int mode, pvr_poly_hdr_t *dst)
 {
     static struct {
         bool used;
         pvr_list_t list;
         pvr_ptr_t ptr;
         int w, h, mode;
+        uint32_t id;
         pvr_poly_hdr_t hdr;
     } cache[HEADER_CACHE];
+    static uint32_t compiled;
     pvr_ptr_t ptr = tex >= 0 ? textures[tex].ptr : NULL;
     int w = tex >= 0 ? textures[tex].bw : 0, h = tex >= 0 ? textures[tex].bh : 0;
     unsigned slot = ((unsigned)((uintptr_t)ptr >> 5) ^ (unsigned)list * 7u ^ (unsigned)(mode + 1) * 13u) % HEADER_CACHE;
     if (cache[slot].used && cache[slot].list == list && cache[slot].ptr == ptr && cache[slot].w == w &&
-        cache[slot].h == h && cache[slot].mode == mode)
-        return cache[slot].hdr;
+        cache[slot].h == h && cache[slot].mode == mode) {
+        *dst = cache[slot].hdr;
+        return cache[slot].id;
+    }
     pvr_poly_cxt_t cxt;
     if (tex >= 0)
         pvr_poly_cxt_txr(&cxt, list, PVR_TXRFMT_ARGB1555 | PVR_TXRFMT_NONTWIDDLED, w, h, ptr, PVR_FILTER_NONE);
@@ -365,8 +375,10 @@ static pvr_poly_hdr_t header(pvr_list_t list, int tex, int mode)
     cache[slot].w = w;
     cache[slot].h = h;
     cache[slot].mode = mode;
+    cache[slot].id = ++compiled;
     pvr_poly_compile(&cache[slot].hdr, &cxt);
-    return cache[slot].hdr;
+    *dst = cache[slot].hdr;
+    return cache[slot].id;
 }
 
 /* Texture coordinates of the primitive being added: texel (u, v) is at ((u - u0) * su, (v - v0) * sv). */
@@ -398,7 +410,7 @@ static Prim *add_prim(const HwState *s, int variant, int *mode, int u0, int v0, 
     *mode = blended ? (int)(s->texpage >> 5 & 3) : -1;
     pvr_list_t list = blended ? PVR_LIST_TR_POLY : tex >= 0 ? PVR_LIST_PT_POLY : PVR_LIST_OP_POLY;
     Prim *p = &cur->prims[cur->count];
-    p->hdr = header(list, tex, *mode);
+    p->hdr_id = header(list, tex, *mode, &p->hdr);
     p->list = (uint8_t)list;
     p->tex = (int16_t)tex;
     cur->count++;
@@ -440,15 +452,15 @@ static float next_z(void)
 }
 
 /* The GPU skips triangles with an edge of 1024 x 512 or more. */
+static bool edge_ok(const HwVertex *a, const HwVertex *b)
+{
+    unsigned dx = (unsigned)(a->x - b->x + 1023), dy = (unsigned)(a->y - b->y + 511);
+    return dx <= 2046 && dy <= 1022;
+}
+
 static bool drawable(const HwVertex *a, const HwVertex *b, const HwVertex *c)
 {
-    const HwVertex *t[3] = {a, b, c};
-    for (int i = 0; i < 3; i++) {
-        int dx = t[i]->x - t[(i + 1) % 3]->x, dy = t[i]->y - t[(i + 1) % 3]->y;
-        if (dx > 1023 || dx < -1023 || dy > 511 || dy < -511)
-            return false;
-    }
-    return true;
+    return edge_ok(a, b) && edge_ok(b, c) && edge_ok(c, a);
 }
 
 static void strip_variant(const HwState *s, int variant, const HwVertex *const *v, int count)
@@ -797,18 +809,18 @@ static void submit(const Slot *s, pvr_list_t list)
     pvr_list_begin(list);
     if (list == PVR_LIST_OP_POLY)
         draw_backdrop(s);
-    const pvr_poly_hdr_t *last = NULL;
+    uint32_t last = 0;
     int visible = s->pending ? s->mark : s->count; /* a frame begun over it isn't finished */
     for (int i = 0; i < visible; i++) {
         const Prim *p = &s->prims[i];
         if (p->list != list)
             continue;
-        if (!last || memcmp(last, &p->hdr, sizeof(p->hdr)) != 0) {
-            pvr_prim(&p->hdr, sizeof(p->hdr));
-            last = &p->hdr;
+        if (p->hdr_id != last) {
+            pvr_prim(&p->hdr, sizeof(pvr_vertex_t) * (size_t)(p->count + 1));
+            last = p->hdr_id;
+        } else {
+            pvr_prim(p->v, sizeof(pvr_vertex_t) * p->count);
         }
-        for (int k = 0; k < p->count; k++)
-            pvr_prim(&p->v[k], sizeof(p->v[k]));
     }
     pvr_list_finish();
 }
